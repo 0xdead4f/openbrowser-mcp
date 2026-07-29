@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "OpenBrowser MCP",
+  "version": "0.2.0",
+  "description": "Browser automation over MCP for coding agents. Any Chromium browser, any profile. No domain blocklist.",
+  "minimum_chrome_version": "116",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwvlIXkHxs63ejy7O2xIf0ctVuhiReDrINxMwB4DCdBoQiWvnF1DNYfFjPx7vfEsVheyTpmhHWMgoXkhRcQIld3pIpkpKlvv+vpQ+8IEYqVZ/faZqK0Tjx9qhctVvFMYFhCA65w5K7k79XPJEXO+ZTR4nWKEixTRHxqdaPmjCUFeLU2Dq6PcWHpkYVPQfFM0vteWPo/eM6RQAlc5PwYfSTvOifXmpzwssSgZxqCO6bTTSk3q3sX4IW5HQ9gnDsnbqsGchbnbYz//EF7wFvjYB3R17CV+0Ob3JHmEm+2vs8UMwUYDr4lCRfBiE1/0g7TYp/Dy8HlNZVxG4GqCYeNx7TQIDAQAB",
+  "permissions": [
+    "tabs",
+    "debugger",
+    "activeTab",
+    "scripting",
+    "nativeMessaging",
+    "tabGroups",
+    "windows",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_title": "OpenBrowser MCP",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

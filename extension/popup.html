@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>OpenBrowser MCP</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { width: 260px; margin: 0; padding: 12px; font: 13px system-ui, sans-serif; }
+  h1 { margin: 0 0 8px; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  h1 img { width: 16px; height: 16px; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; margin: 0 0 10px; }
+  dt { opacity: 0.6; }
+  dd { margin: 0; font-variant-numeric: tabular-nums; }
+  #status.on { color: #1a7f37; }
+  #status.off { color: #b35900; }
+  label { display: block; margin-bottom: 4px; opacity: 0.6; }
+  input { width: 100%; box-sizing: border-box; padding: 4px 6px; font: inherit; }
+  button { margin-top: 8px; padding: 4px 10px; font: inherit; }
+  #saved { margin-left: 8px; opacity: 0; transition: opacity 0.15s; }
+  #saved.show { opacity: 0.6; }
+</style>
+<h1><img src="icons/icon32.png" alt="">OpenBrowser MCP</h1>
+<dl>
+  <dt>status</dt><dd id="status">…</dd>
+  <dt>browser</dt><dd id="brand">…</dd>
+  <dt>id</dt><dd id="browserId">…</dd>
+</dl>
+<label for="label">Profile label</label>
+<input id="label" type="text" placeholder="work" maxlength="40" autocomplete="off">
+<button id="save">Save</button><span id="saved">saved</span>
+<script src="popup.js"></script>
