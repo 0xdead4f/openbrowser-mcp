@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <em>A Claude in Chrome clone that attaches to your real browser profile and drives it live.<br/>
+  <em>A zero depedencies Claude in Chrome clone that attaches to your real browser profile.<br/>
   <strong>Any Chromium browser, every profile at once, no domain blocklist.</strong></em>
 </p>
 
