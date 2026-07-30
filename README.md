@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Node.js-%E2%89%A5%2020-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js 20+"> <img src="https://img.shields.io/badge/Chromium-any-4285F4?style=flat-square&logo=googlechrome&logoColor=white" alt="Any Chromium browser"> <img src="https://img.shields.io/badge/MCP-stdio-D97757?style=flat-square&logo=anthropic&logoColor=white" alt="MCP stdio server"> <img src="https://img.shields.io/badge/dependencies-0-brightgreen?style=flat-square" alt="Zero runtime dependencies"> <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License">
+  <img src="https://img.shields.io/badge/Node.js-%E2%89%A5%2020-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js 20+"> <img src="https://img.shields.io/badge/Chromium-any-4285F4?style=flat-square&logo=googlechrome&logoColor=white" alt="Any Chromium browser"> <img src="https://img.shields.io/badge/MCP-stdio-D97757?style=flat-square&logo=anthropic&logoColor=white" alt="MCP stdio server"> <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License">
 </p>
 
 <p align="center">
