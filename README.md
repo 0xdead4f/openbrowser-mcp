@@ -75,6 +75,48 @@ It prints `✓ connected — Google Chrome / Default` and exits. Repeat step 2 o
 extension ID is pinned to `egpoedeomkhpkhiikghpjjcghafafbdc`, so one install covers every profile
 of that browser.
 
+### Registering with another coding agent
+
+The installer only wires up Claude Code. Any other MCP stdio client needs the same two fields —
+command `node`, args the absolute path to `host/mcp-server.js`:
+
+```json
+{
+  "mcpServers": {
+    "openbrowser": {
+      "command": "node",
+      "args": ["/absolute/path/to/openbrowser-mcp/host/mcp-server.js"]
+    }
+  }
+}
+```
+
+Put that in the client's MCP config and restart it. Where that config lives, and what the key is
+called, is the only thing that differs:
+
+| Client | Config | Key |
+|---|---|---|
+| Claude Code | done by `install.sh` — or `claude mcp add openbrowser -- node <repo>/host/mcp-server.js` | — |
+| Cursor | `~/.cursor/mcp.json`, or `.cursor/mcp.json` per project | `mcpServers` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` | `mcpServers` |
+| Gemini CLI | `~/.gemini/settings.json` | `mcpServers` |
+| Cline / Roo | MCP Servers → Configure → `cline_mcp_settings.json` | `mcpServers` |
+| VS Code (Copilot) | `.vscode/mcp.json` | `servers` |
+| Zed | `settings.json` | `context_servers` |
+| Codex CLI | `~/.codex/config.toml` | see below |
+
+Codex uses TOML rather than JSON:
+
+```toml
+[mcp_servers.openbrowser]
+command = "node"
+args = ["/absolute/path/to/openbrowser-mcp/host/mcp-server.js"]
+```
+
+The broker is shared, so several agents — and several sessions of the same agent — can register at
+once and drive the same browsers side by side. Check your client's own docs if a path above has
+moved.
+
 **If something breaks:** `./install.sh --doctor` checks every failure mode worth checking — the
 manifest per browser, whether `node` resolves, the broker, stale pidfiles, and which profiles have
 the extension loaded. `./install.sh --uninstall` starts over.
