@@ -1,4 +1,4 @@
-// Minimal popup: connection status and the per-profile label (PLAN §2, §7.1). Both come from
+// Minimal popup: connection status and the per-profile label. Both come from
 // the service worker, which owns identity.js and the native port — nothing is stored here.
 
 const $ = (id) => document.getElementById(id);

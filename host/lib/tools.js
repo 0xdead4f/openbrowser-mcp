@@ -16,27 +16,30 @@ export const TOOLS = [
   {
     name: "tabs_context_mcp",
     description:
-      "MCP windows with windowId, incognito flag and tab IDs. Call first if you have no tabId.",
-    inputSchema: {
-      type: "object",
-      properties: { createIfEmpty: bool, incognito: bool, windowId: num },
-    },
+      "Every tab group with windowId, groupId, name and tab IDs. Only grouped tabs can be driven.",
+    inputSchema: { type: "object", properties: { windowId: num } },
     _meta: meta(20000),
   },
   {
     name: "tabs_create_mcp",
     description:
-      "New empty tab in an MCP group, reusing the newest matching window.",
+      "Opens a background tab in a new tab group, or in tabId's group. Start each task with your own group and keep its tab IDs; names are only labels.",
     inputSchema: {
       type: "object",
-      properties: { incognito: bool, windowId: num, newWindow: bool },
+      properties: {
+        group: { type: "string", description: "Name for the new group." },
+        tabId: { type: "number", description: "Join this tab's group instead." },
+        temporaryContainer: { type: "boolean", description: "Brave only: fresh isolated cookies and storage." },
+        incognito: bool,
+        windowId: num,
+      },
     },
     _meta: meta(20000),
   },
   {
     name: "tabs_close_mcp",
-    description: "Closes an MCP tab or MCP window.",
-    inputSchema: { type: "object", properties: { tabId: num, windowId: num } },
+    description: "Closes a grouped tab, or every tab of groupId.",
+    inputSchema: { type: "object", properties: { tabId: num, groupId: num } },
     _meta: meta(20000),
   },
   {

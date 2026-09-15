@@ -6,8 +6,8 @@
 </p>
 
 <p align="center">
-  <em>A zero depedencies Claude in Chrome clone that attaches to your real browser profile.<br/>
-  <strong>Any Chromium browser, every profile at once, no domain blocklist.</strong></em>
+  <em>A zero-dependency Claude in Chrome clone that attaches to your real browser profile.<br/>
+  <strong>Any Chromium browser, every profile at once, Brave container support, no domain blocklist.</strong></em>
 </p>
 
 <p align="center">
@@ -18,6 +18,7 @@
   <a href="#explanation">Explanation</a> ·
   <a href="#installation">Installation</a> ·
   <a href="#tools">Tools</a> ·
+  <a href="#workspaces-and-brave-temporary-containers">Workspaces &amp; Brave containers</a> ·
   <a href="#license">License</a>
 </p>
 
@@ -38,6 +39,12 @@ A few things worth knowing:
 - **Many profiles at once.** A detached broker process lets several agent sessions share one
   browser, and serves Chrome Default + Chrome work + Brave simultaneously. Each profile gets a
   stable id; `browser_select` pins one per agent session.
+- **Every agent gets its own tab group.** Agents open background tabs in a named group of their
+  own and never focus a window, so several can work in your browser while you keep using it.
+- **Brave container support.** In Brave, `tabs_create_mcp({temporaryContainer: true})` gives an
+  agent's group its own temporary container: cookies and storage separate from your profile and
+  from every other agent, so four agents can be logged in to the same site as four different users.
+  See [Workspaces & Brave containers](#workspaces-and-brave-temporary-containers).
 - **Refs, not screenshots.** `page_outline` or `read_page` hand back element refs like `e214` that
   you pass straight to `computer({action:"left_click", ref:"e214"})`. A screenshot costs ~1,296
   tokens; a `read_page` is roughly 15× cheaper. Take a screenshot when you need to *see* something,
@@ -45,7 +52,8 @@ A few things worth knowing:
 - **Big things go to disk.** `sources_download` writes files to a tree and returns only counts and
   a manifest path, so a 100 MB download never becomes a 100 MB string in context.
 - **Incognito** windows are supported, but all of them share one session: separate windows give you
-  separate tab groups, not separate logins. Use separate profiles for isolated cookie jars.
+  separate tab groups, not separate logins. For isolated cookie jars use Brave temporary containers
+  or separate profiles.
 
 > **Heads up:** this drives a real browser holding your real sessions, with `debugger` and
 > `<all_urls>` permissions, and there is no approval prompt — whatever the agent asks for happens.
@@ -121,18 +129,21 @@ moved.
 manifest per browser, whether `node` resolves, the broker, stale pidfiles, and which profiles have
 the extension loaded. `./install.sh --uninstall` starts over.
 
-**After changing code:** reload the extension for anything under `extension/`; `pkill -f
-"node.*mcp-server"` then `/mcp` for `host/`; restart the browser for `host/native-host.js`.
+**After updating or changing code:** reload the extension for anything under `extension/` (this
+version adds the `cookies` permission, so the browser may show a new permission warning); `pkill -f
+"node.*mcp-server"` then `/mcp` for `host/`; restart the browser for `host/native-host.js`, which
+Brave containers need.
 
 ## Tools
 
-20 tools. `tabs_context_mcp` gives you a `tabId`; everything else takes one.
+20 tools. `tabs_create_mcp` opens a tab in a group of your own and gives you its `tabId`;
+everything else takes one.
 
 | Tabs | |
 |---|---|
-| `tabs_context_mcp` | List MCP windows and their tabs. |
-| `tabs_create_mcp` | Open a tab, optionally in a new or incognito window. |
-| `tabs_close_mcp` | Close an MCP tab, or a whole MCP window. |
+| `tabs_context_mcp` | List every tab group — window, group id, name, colour, container — and its tabs. |
+| `tabs_create_mcp` | Open a background tab in a new named group, or in `tabId`'s group; `temporaryContainer` in Brave. |
+| `tabs_close_mcp` | Close one grouped tab, or every tab of a `groupId`. No `windowId`; a window closes only if nothing else was in it. |
 
 | Interaction | |
 |---|---|
@@ -140,7 +151,7 @@ the extension loaded. `./install.sh --uninstall` starts over.
 | `computer` | Mouse, keyboard, scroll and screenshot — by `ref` or `coordinate`. |
 | `form_input` | Set a form field's value by ref. |
 | `javascript_tool` | Run JS in the page, isolated world by default. |
-| `resize_window` | Re-point the emulated viewport. |
+| `resize_window` | Re-point the emulated viewport; the OS window is left alone. |
 
 | Reading the page | |
 |---|---|
@@ -164,6 +175,71 @@ the extension loaded. `./install.sh --uninstall` starts over.
 | `browser_select` | Pin one browser as this session's default. |
 
 Downloads land in `./source/` relative to your cwd — add it to your `.gitignore`.
+
+## Workspaces and Brave temporary containers
+
+An agent cannot tell which of your windows or tabs is meant for it, so each one starts its own
+**workspace: a tab group**. `tabs_create_mcp({group: "checkout"})` always creates a new group (the
+name defaults to the agent's working directory) with one tab, and returns that tab's id.
+
+- **The name is a label, the tab id is the identity.** Nothing is looked up by name; two agents
+  that pick the same name get two separate groups. To add a tab to a workspace, pass one of its
+  tab ids: `tabs_create_mcp({tabId})`.
+- **Your view stays yours.** Tabs open in the background, in the window you last used; a new
+  window is only created (unfocused) when there is none. `resize_window` changes the emulated
+  viewport, never the window. When a page an agent drives opens a new tab, your window is switched
+  back to the tab you had. Background tabs never need activating: clicks, typing and timers work
+  as if the tab were in front.
+- **Any tab group is usable, ungrouped tabs are not.** An agent may act on a group you made
+  yourself; a tab outside every group is refused — except by `sources_list` and `sources_download`,
+  which read any tab.
+
+**Temporary containers (Brave only).** `tabs_create_mcp({group, temporaryContainer: true})` puts the
+group's tab in a brand-new Brave temporary container, so its cookies and site storage are separate
+from your profile and from every other group. On any other browser the flag is an error; without
+it a group is a plain tab group with no isolation, in Brave too. It cannot be combined with
+`incognito`.
+
+```js
+tabs_create_mcp({ group: "checkout as buyer", temporaryContainer: true })
+// → Created tab 812 in group 4061 "checkout as buyer" (window 3, temporary container "checkout as buyer #7519").
+tabs_create_mcp({ tabId: 812 })   // a second tab in the same group and the same container
+```
+
+- **One container per group.** A tab added with `tabs_create_mcp({tabId})`, and any tab a page in
+  the group opens (`window.open`, `target=_blank`), stays in that group's container. Agents that
+  ask at the same time each get their own container; creations run one after another, a few
+  hundred milliseconds each.
+- **Verified, not assumed.** Before handing out a container tab, and again before every tool call
+  that acts in the page, the extension reads the tab's own cookie jar through its debugger session:
+  it must carry the group's container stamp and must not see a canary cookie planted in your default
+  jar. A tab that fails is refused with instructions, never used. `sources_list` and
+  `sources_download` read without that check, and fetch without cookies for container tabs. In
+  Brave, navigating to `about:blank` or a browser-internal page is refused for any tab not proven to
+  be in your default jar — Brave silently moves a container tab into your default jar when the
+  browser navigates it to `about:blank`.
+- **Temporary is not wiped on close.** Closing a container's tabs does not delete its data. Brave
+  removes a temporary container at a later browser restart, once nothing references it (no open
+  tab, not in the last session, not among the recently closed tabs).
+- **How it works.** No extension API can create a container, so the native host relaunches Brave's
+  own binary with `--temporary-container --container=<name>` for your profile, and Brave hands that
+  to the running browser (adding a tab to a container group works the same way). Brave opens that
+  tab active and brings its app to the front: your window is switched back to the previous tab at
+  once, and on macOS the native host hands focus back to the app you were in, so Brave is in front
+  for roughly 20–40 ms. Works on macOS, Linux and Windows; it does not work when Brave was started
+  with `--enable-automation`.
+- **Known limitations.**
+  - On Linux and Windows, Brave currently stays in front after each container creation (and each
+    tab added to a container group); only macOS hands focus back.
+  - A page an agent drives that opens a new tab (`window.open`, `target=_blank`) brings Brave to
+    the front too; your tab is switched back, app focus is not.
+  - When the last-focused Brave window is a popup, app or DevTools window, Brave opens the container
+    tab in a new window, which closes again once the tab is moved into the chosen window.
+  - Brave 1.95 has crashed when an extension edited the tab strip while a tab was being dragged
+    with the mouse. The extension keeps its tab edits few and retries the ones Brave refuses during
+    a drag, but avoid dragging tabs while agents are creating tabs.
+  - A page an agent has driven reports itself as visible and focused, even in the background, until
+    its tab closes or the broker retires (5 minutes after the last agent disconnects).
 
 ## License
 

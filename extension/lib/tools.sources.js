@@ -3,7 +3,8 @@
 // resource tree instead of a DOM sweep, and the bytes come from the renderer's own cache first.
 
 import { cdp, ensureDomain } from "./cdp.js";
-import { resolveContext } from "./contexts.js";
+import { knownRecord } from "./contexts.js";
+import { isBrave, readsDefaultJar } from "./brave-containers.js";
 import { observedUrls } from "./net.js";
 
 const DEFAULT_MAX_ENTRIES = 200;
@@ -217,14 +218,9 @@ async function targetTab(args) {
       throw new Error(`No tab with id ${args.tabId}.`);
     }
   }
-  // Not restricted to the MCP group: pointing at a tab the user opened and logged into is the
-  // point of these two tools. The MCP group is only preferred when no tabId was given.
-  const resolved = await resolveContext({ createIfEmpty: false });
-  if (resolved) {
-    const grouped = await chrome.tabs.query({ groupId: resolved.ctx.groupId });
-    const pick = grouped.find((t) => t.active) || grouped[0];
-    if (pick) return pick;
-  }
+  // Not restricted to tab groups: pointing at a tab the user opened and logged into is the point of
+  // these two tools. With several agents' groups open there is no "own" group to prefer, so the
+  // default is simply the tab the human is looking at.
   const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!active) throw new Error("No tab to read sources from — pass tabId.");
   return active;
@@ -525,10 +521,26 @@ async function fromNetwork(tabId, item) {
   return { bytes: res.base64Encoded ? base64ToBytes(res.body) : textToBytes(res.body), source: "network" };
 }
 
-// Tier 4 is the one that matters for pentest: it fetches as the logged-in session, which no
-// external crawler can do.
-async function fromCredentialedFetch(item, allowedHosts) {
-  const res = await fetch(item.url, { credentials: "include", redirect: "follow", cache: "no-cache" });
+// Tier 4 runs in this service worker, whose fetch always carries the profile's DEFAULT cookie jar. For
+// a normal tab that is the point — it fetches as the logged-in session, which no external crawler can
+// do. For a tab holding another jar it is exactly wrong: a Brave temporary container (or an incognito
+// tab) would get the human's default-jar session mixed into what the agent believes is its isolated
+// one. Those fetch without cookies. On Brave only a tab that provably reads the default jar keeps
+// credentials, since a container tab can sit outside any known group (opened from Brave's own UI, or a
+// group not yet re-learned after a restart); an unreadable jar counts as not default.
+async function fetchCredentials(tab) {
+  if (tab.incognito) return "omit";
+  if ((await knownRecord(tab))?.container) return "omit";
+  if (!(await isBrave())) return "include";
+  try {
+    return (await readsDefaultJar(tab.id)) ? "include" : "omit";
+  } catch {
+    return "omit";
+  }
+}
+
+async function fromCredentialedFetch(item, allowedHosts, credentials) {
+  const res = await fetch(item.url, { credentials, redirect: "follow", cache: "no-cache" });
   // redirect:"manual" would hand back an opaque response with no readable body, so the only
   // available check is on the final URL — the body is discarded if the chain left `origins`.
   const landedOn = hostOf(res.url || item.url);
@@ -543,18 +555,18 @@ async function fromCredentialedFetch(item, allowedHosts) {
   const buf = new Uint8Array(await res.arrayBuffer());
   return {
     bytes: buf,
-    source: "fetch-auth",
+    source: credentials === "include" ? "fetch-auth" : "fetch",
     httpStatus: res.status,
     contentType: res.headers.get("content-type") || item.mimeType,
   };
 }
 
-async function resolveContent(tabId, item, allowedHosts) {
+async function resolveContent(tabId, item, allowedHosts, credentials) {
   const tiers = [
     () => fromResourceTree(tabId, item),
     () => fromDebugger(tabId, item),
     () => fromNetwork(tabId, item),
-    () => fromCredentialedFetch(item, allowedHosts),
+    () => fromCredentialedFetch(item, allowedHosts, credentials),
   ];
   const errors = [];
   let blocked = false;
@@ -607,7 +619,7 @@ function sourcemapPath(src) {
   return p || "unknown";
 }
 
-async function loadSourceMap(tabId, item, mapUrl, allowedHosts) {
+async function loadSourceMap(tabId, item, mapUrl, allowedHosts, credentials) {
   if (mapUrl.startsWith("data:")) {
     const comma = mapUrl.indexOf(",");
     const head = mapUrl.slice(0, comma);
@@ -617,7 +629,12 @@ async function loadSourceMap(tabId, item, mapUrl, allowedHosts) {
   }
   const abs = new URL(mapUrl, item.url).href;
   if (!allowedHosts.has(hostOf(abs))) return null;
-  const got = await resolveContent(tabId, { ...item, url: abs, scriptId: null, sourceMapURL: null }, allowedHosts);
+  const got = await resolveContent(
+    tabId,
+    { ...item, url: abs, scriptId: null, sourceMapURL: null },
+    allowedHosts,
+    credentials
+  );
   if (got.miss) return null;
   return { url: abs, json: JSON.parse(decoder.decode(got.bytes)) };
 }
@@ -674,6 +691,7 @@ export const handlers = {
     // sources_list({dynamic:true}) keeps its scripts either way.
     const entry = await collectTree(tab.id, { dynamic: !!args.dynamic });
     const all = itemsOf(entry);
+    const credentials = await fetchCredentials(tab);
 
     const include = asArray(args.include);
     const exclude = asArray(args.exclude);
@@ -722,7 +740,7 @@ export const handlers = {
     const queue = selected.slice(0, maxFiles);
     skipped.capped = selected.length - queue.length;
 
-    const tiers = { resourceTree: 0, debugger: 0, network: 0, "fetch-auth": 0 };
+    const tiers = { resourceTree: 0, debugger: 0, network: 0, "fetch-auth": 0, fetch: 0 };
     const failed = [];
     const retry = [];
     const maps = { maps: 0, sources: 0, bytes: 0 };
@@ -745,7 +763,7 @@ export const handlers = {
 
       let got;
       try {
-        got = await resolveContent(tab.id, item, allowedHosts);
+        got = await resolveContent(tab.id, item, allowedHosts, credentials);
       } catch (e) {
         failed.push(`${item.url} — ${e?.message || e}`);
         return;
@@ -783,7 +801,7 @@ export const handlers = {
 
       let map;
       try {
-        map = await loadSourceMap(tab.id, item, mapUrl, allowedHosts);
+        map = await loadSourceMap(tab.id, item, mapUrl, allowedHosts, credentials);
       } catch (e) {
         failed.push(`${mapUrl} — sourcemap: ${e?.message || e}`);
         return;

@@ -13,6 +13,7 @@ const MAX_SCREENSHOTS = 10;
 
 const attachedTabs = new Map(); // tabId -> { enabledDomains: Set, viewport: {width, height} }
 const attaching = new Map(); // tabId -> in-flight attach promise
+const probing = new Map(); // tabId -> promise that settles when withTransientSession has detached again
 const screenshotStore = new Map(); // imageId -> base64
 
 let imageSeq = 0;
@@ -28,6 +29,10 @@ export function attachedTabIds() {
 }
 
 export async function ensureAttached(tabId) {
+  // A transient probe session is torn down by its own detach, and chrome.debugger fires no onDetach
+  // for that, so an attach that tolerated it as "already attached" would be left recorded as held
+  // while no session exists — every later command on the tab would fail until it closed.
+  while (probing.has(tabId)) await probing.get(tabId);
   if (attachedTabs.has(tabId)) return;
   let pending = attaching.get(tabId);
   if (!pending) {
@@ -50,6 +55,15 @@ async function doAttach(tabId) {
   attachedTabs.set(tabId, { enabledDomains: new Set() });
   try {
     await pinViewport(tabId);
+    // Agent tabs open in the background, so they are hidden, and a hidden page gets no rAF, timers
+    // clamped to ~1 s, and — the fatal part — no ack for Input.dispatchMouseEvent mouseMoved, which
+    // hung every click, hover and drag until the client's timeout (6 of 6 on Brave 1.95). Emulated
+    // focus makes the page visible and focused to itself without activating any tab, window or app
+    // (moves ack in 10-17 ms). Per session: a detach clears it, so every attach and re-attach sets it.
+    // Tolerated: a browser that rejects it still gets clicks through tools.core.js's move timeout.
+    try {
+      await chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled: true });
+    } catch {}
   } catch (e) {
     // The first command is what proves the tolerated attach really was ours. If it was not,
     // the entry has to go — ensureAttached short-circuits on it, so leaving it behind makes
@@ -62,6 +76,45 @@ async function doAttach(tabId) {
         )
       : e;
   }
+}
+
+// Runs fn with a debugger session on tabId, for a read-only look at a tab no tool may go on to use
+// (brave-containers.js classifying a group through the human's own tab). A tab this module does not
+// hold yet gets a session of its own that is detached again afterwards: no viewport pin re-laying out
+// the human's page, no focus emulation, no session (and "is debugging" bar) left behind. A tab that is
+// already held, or being attached, is read through that session, which stays.
+export async function withTransientSession(tabId, fn) {
+  while (probing.has(tabId)) await probing.get(tabId);
+  if (!attachedTabs.has(tabId) && !attaching.has(tabId)) {
+    let release;
+    probing.set(tabId, new Promise((resolve) => (release = resolve)));
+    const done = () => {
+      probing.delete(tabId);
+      release();
+    };
+    let attached = false;
+    try {
+      await chrome.debugger.attach({ tabId }, "1.3");
+      attached = true;
+    } catch (e) {
+      done();
+      // Our own session that outlived a worker restart, or another debugger: ensureAttached (below)
+      // is what tells the two apart.
+      if (!/already attached/i.test(String(e?.message || e))) throw e;
+    }
+    if (attached) {
+      try {
+        return await fn();
+      } finally {
+        try {
+          await chrome.debugger.detach({ tabId });
+        } catch {}
+        done();
+      }
+    }
+  }
+  await ensureAttached(tabId);
+  return fn();
 }
 
 // The override is pinned for the life of the attachment, not cleared after each capture.

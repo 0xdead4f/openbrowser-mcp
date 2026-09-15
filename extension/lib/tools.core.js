@@ -1,17 +1,38 @@
-// Tools 1-10: MCP tab groups, navigation, input, and page reading.
+// Tools 1-10: tab-group workspaces, navigation, input, and page reading.
 
 import { ensureAttached, ensureDomain, cdp, captureScreenshot, detach, setViewport, CAPTURE_W, CAPTURE_H } from "./cdp.js";
 import { snapshotRefs, resolveRefForAction, formatRef } from "./refs.js";
-import { contexts, syncContexts, contextOfTab, resolveContext, isInGroup, formatTabContext } from "./contexts.js";
+import {
+  requireTab,
+  groupedTab,
+  groupEntry,
+  listGroups,
+  formatGroups,
+  groupName,
+  groupLabel,
+  createGroup,
+  addTabToGroup,
+} from "./contexts.js";
+import { isBrave, readsDefaultJar } from "./brave-containers.js";
 
 const DEFAULT_MAX_CHARS = 20000;
 const SNAPSHOT_MAX_CHARS = 2000;
 const LOAD_TIMEOUT_MS = 10000;
+// Chromium acks a mouseMoved in ~10-20 ms on a page that renders; one that has not acked after this is
+// on a hidden page that never will (see moveMouse).
+const MOUSE_MOVE_ACK_MS = 3000;
 
 // Refs minted by refs.js: e17, f2e17, ba3f1c9d2f2e17. Anything else is a content-script ref_N.
 const CDP_REF = /^(?:b[0-9a-f]{1,16})?(?:f\d+)?e\d+$/;
 
 const CLICK_ACTIONS = new Set(["left_click", "right_click", "double_click", "triple_click"]);
+
+// Schemes a tab that may be in a Brave temporary container must not be sent to by the browser. A
+// browser-initiated navigation to about:blank (any fragment or query; chrome.tabs.update and CDP
+// Page.navigate alike) moves a container tab into the profile's default cookie jar for good, with no
+// error; the other about: pages resolve to chrome:// ones, and those refuse the debugger, so the tab's
+// isolation could never be checked again and every later call on it would fail.
+const CONTAINER_UNSAFE_SCHEMES = new Set(["about:", "chrome:", "brave:", "chrome-untrusted:", "devtools:"]);
 
 const INTERACTIVE_ROLES = new Set([
   "button", "link", "textbox", "searchbox", "checkbox", "radio", "combobox", "listbox",
@@ -28,10 +49,6 @@ function text(t) {
   return { content: [{ type: "text", text: t }] };
 }
 
-function notInGroup(tabId) {
-  return text(`Tab ${tabId} is not in the MCP group.`);
-}
-
 function clampInt(value, fallback, min, max) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
@@ -40,14 +57,6 @@ function clampInt(value, fallback, min, max) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// formatTabContext owns the one rendering of a context; accept either the bare markdown or a
-// full result object so a prefix can be prepended without knowing which it returned.
-function tabContextResult(entries, prefix) {
-  const rendered = formatTabContext(entries);
-  const body = typeof rendered === "string" ? rendered : rendered.content[0].text;
-  return text(prefix ? prefix + "\n\n" + body : body);
 }
 
 // --- Key and modifier parsing ---
@@ -100,12 +109,31 @@ async function dispatchMouse(tabId, type, x, y, opts = {}) {
   });
 }
 
+// A mouseMoved is rAF-aligned, and a hidden page (every background agent tab) runs no rAF, so Chromium
+// never acks it there: awaiting it hung clicks, hover and drags until the client's 60 s timeout, with no
+// click at all. cdp.js enables focus emulation on attach, which fixes that; this is the net for a session
+// where that did not take. Resolves true once acked, false after MOUSE_MOVE_ACK_MS — mousePressed and
+// mouseReleased still ack on a hidden page and deliver a trusted click, so the caller carries on.
+async function moveMouse(tabId, x, y, opts = {}) {
+  const acked = dispatchMouse(tabId, "mouseMoved", x, y, opts).then(() => true);
+  acked.catch(() => {}); // a rejection after the timeout won the race must not go unhandled
+  let timer;
+  const gaveUp = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(false), MOUSE_MOVE_ACK_MS);
+  });
+  try {
+    return await Promise.race([acked, gaveUp]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function mouseClick(tabId, x, y, opts = {}) {
   const button = opts.button || "left";
   const clickCount = opts.clickCount || 1;
   const modifiers = opts.modifiers || 0;
 
-  await dispatchMouse(tabId, "mouseMoved", x, y, { modifiers });
+  await moveMouse(tabId, x, y, { modifiers });
   await sleep(50);
   await dispatchMouse(tabId, "mousePressed", x, y, { button, clickCount, modifiers });
   await sleep(50);
@@ -269,96 +297,87 @@ const SET_VALUE_FN = `function(value) {
 }`;
 
 export const handlers = {
+  // Read-only on purpose: listing never creates, probes or attaches, so an agent can look before it
+  // decides. A group only shows as a temporary container once this worker knows it is one (it created
+  // it, or a gated call re-learned it after a restart).
   async tabs_context_mcp(args) {
-    const { incognito, windowId, createIfEmpty } = args;
-
-    if (createIfEmpty || windowId != null) {
-      await resolveContext({ windowId, incognito, createIfEmpty: !!createIfEmpty });
-    } else {
-      await syncContexts();
-    }
-
-    let entries = [...contexts].map(([id, ctx]) => ({ windowId: id, ctx }));
-    if (windowId != null) entries = entries.filter((e) => e.windowId === windowId);
-    if (incognito !== undefined) entries = entries.filter((e) => e.ctx.incognito === !!incognito);
-
+    const entries = await listGroups({ windowId: args.windowId });
     if (entries.length === 0) {
       return text(
-        "No MCP tab group exists. Use createIfEmpty: true to create one (add incognito: true for an incognito window)."
+        args.windowId != null
+          ? `No tab groups in window ${args.windowId}. Call tabs_context_mcp without windowId to list every ` +
+              `window, or tabs_create_mcp to open a tab in a new group.`
+          : "No tab groups. Call tabs_create_mcp to open a tab in a new group of your own (in Brave, " +
+              "temporaryContainer: true also gives it its own cookies and storage). Ungrouped tabs cannot be used."
       );
     }
-
-    const withTabs = [];
-    for (const e of entries) {
-      withTabs.push({ ...e, tabs: await chrome.tabs.query({ groupId: e.ctx.groupId }) });
-    }
-    return tabContextResult(withTabs);
+    return text(formatGroups(entries));
   },
 
+  // Without tabId this ALWAYS makes a new group, even when one with that name exists: agents that pick
+  // the same name must never land in each other's tabs, and the returned tab id is how an agent finds
+  // its workspace again. With tabId, the other params only have to agree with that tab's group.
   async tabs_create_mcp(args) {
-    const { incognito, windowId, newWindow } = args;
-    const { windowId: winId, ctx } = await resolveContext({ windowId, incognito, newWindow });
+    const { tab, group, record } =
+      args.tabId != null
+        ? await addTabToGroup(args.tabId, {
+            group: args.group,
+            windowId: args.windowId,
+            incognito: args.incognito,
+            temporaryContainer: args.temporaryContainer,
+          })
+        : await createGroup({
+            group: args.group,
+            windowId: args.windowId,
+            incognito: args.incognito === true,
+            temporaryContainer: args.temporaryContainer === true,
+          });
 
-    // Create directly in the target window - omitting windowId lands the tab in whatever window
-    // is currently focused, which is the wrong one as soon as more than one MCP window exists.
-    // about:blank, not the chrome://newtab/ default: the debugger cannot attach to a chrome:// URL,
-    // so a newtab-parked tab refuses every attach until the first navigation has already finished —
-    // which is exactly too late for navigate to enable Network and see the document request.
-    // contexts.js opens MCP *windows* at about:blank for the same reason.
-    const tab = await chrome.tabs.create({ active: true, windowId: winId, url: "about:blank" });
-    await chrome.tabs.group({ tabIds: [tab.id], groupId: ctx.groupId });
-    ctx.tabs.add(tab.id);
-
-    const tabs = await chrome.tabs.query({ groupId: ctx.groupId });
-    const where = `window ${winId}${ctx.incognito ? ", incognito" : ""}`;
-    return tabContextResult([{ windowId: winId, ctx, tabs }], `Created tab ${tab.id} (${where}).`);
+    const container = record.container
+      ? `, temporary container ${JSON.stringify(record.container.containerName)}`
+      : "";
+    const head = `Created tab ${tab.id} in group ${group.id} ${groupName(group.title)} (window ${group.windowId}${container}).`;
+    const entry = await groupEntry(group.id);
+    return text(entry ? `${head}\n\n${formatGroups([entry])}` : head);
   },
 
+  // Never takes a windowId: windows are shared with the human and with other agents' groups. A window
+  // still closes when its last tab does, which only happens when nothing else was in it.
   async tabs_close_mcp(args) {
-    const { tabId, windowId } = args;
-    if (tabId == null && windowId == null) {
-      return text("Provide tabId to close one tab, or windowId to close a whole MCP window.");
+    const { tabId, groupId } = args;
+    if (tabId != null && groupId != null) {
+      return text("Pass tabId to close one tab, or groupId to close every tab of a group, not both.");
+    }
+    if (tabId == null && groupId == null) {
+      return text("Pass tabId to close one tab, or groupId to close every tab of a group (ids from tabs_context_mcp).");
     }
 
-    // Whole window. Gated on the context map so a stray windowId can never close one of the
-    // user's own windows - only windows this extension opened are closable.
-    if (tabId == null) {
-      await syncContexts();
-      const ctx = contexts.get(windowId);
-      if (!ctx) {
-        return text(`No MCP window with windowId ${windowId}. Use tabs_context_mcp to list open MCP windows.`);
+    if (groupId != null) {
+      const entry = await groupEntry(groupId);
+      if (!entry) {
+        return text(`No tab group with groupId ${groupId}. Call tabs_context_mcp to list the tab groups.`);
       }
-      const tabs = await chrome.tabs.query({ groupId: ctx.groupId });
-      for (const t of tabs) {
+      for (const t of entry.tabs) {
         try { await detach(t.id); } catch {}
       }
-      await chrome.windows.remove(windowId);
-      contexts.delete(windowId);
-      return text(`Closed MCP window ${windowId}${ctx.incognito ? " (incognito)" : ""} and its ${tabs.length} tab(s).`);
+      await chrome.tabs.remove(entry.tabs.map((t) => t.id));
+      return text(`Closed ${groupLabel(entry.group)} and its ${entry.tabs.length} tab(s).`);
     }
 
-    const found = await contextOfTab(tabId);
-    if (!found) return notInGroup(tabId);
-    const { windowId: winId, ctx } = found;
+    // No isolation check: closing is exactly what the check tells an agent to do with a leaked tab.
+    const { tab, group } = await groupedTab(tabId);
+    try { await detach(tab.id); } catch {}
+    await chrome.tabs.remove(tab.id);
 
-    try { await detach(tabId); } catch {}
-    await chrome.tabs.remove(tabId);
-    ctx.tabs.delete(tabId);
-
-    // Chrome destroys a group with its last tab, and the window with its last tab, so the
-    // context can be gone entirely now.
-    const remaining = await chrome.tabs.query({ groupId: ctx.groupId });
-    if (remaining.length === 0) {
-      contexts.delete(winId);
-      return text(`Closed tab ${tabId}. It was the last tab in MCP window ${winId}, which is now closed too.`);
-    }
-
-    return tabContextResult([{ windowId: winId, ctx, tabs: remaining }], `Closed tab ${tabId}.`);
+    // Chrome destroys a group with its last tab.
+    const entry = await groupEntry(group.id);
+    if (!entry) return text(`Closed tab ${tab.id}. It was the last tab of ${groupLabel(group)}, which is gone now.`);
+    return text(`Closed tab ${tab.id}.\n\n${formatGroups([entry])}`);
   },
 
   async navigate(args, ctx) {
     const { url, tabId } = args;
-    if (!(await isInGroup(tabId))) return notInGroup(tabId);
+    const { tab: gated, group, record } = await requireTab(tabId);
 
     const started = Date.now();
 
@@ -379,10 +398,36 @@ export const handlers = {
       await chrome.tabs.goForward(tabId);
     } else {
       const targetUrl = normalizeUrl(String(url));
+      let parsed;
       try {
-        new URL(targetUrl);
+        parsed = new URL(targetUrl);
       } catch {
         return text(`Invalid URL: "${url}". Could not parse as a valid URL.`);
+      }
+      // null record: a Brave group whose jar could not be read yet, so it may well be a container. A
+      // plain record describes the group, not this tab: a Brave container tab can sit in a plain group
+      // (dragged there, or the human's own container tab), so on Brave the tab must prove it reads the
+      // default jar; an unreadable jar proves nothing. Incognito tabs are never in a container.
+      let mayBeContainer = !record || record.container != null;
+      let unproven = false;
+      if (!mayBeContainer && CONTAINER_UNSAFE_SCHEMES.has(parsed.protocol) && !gated.incognito && (await isBrave())) {
+        unproven = !(await readsDefaultJar(tabId).catch(() => false));
+        mayBeContainer = unproven;
+      }
+      if (mayBeContainer && CONTAINER_UNSAFE_SCHEMES.has(parsed.protocol)) {
+        const where = unproven
+          ? `the tab does not provably read the profile's default cookie jar, so it may be a Brave container tab`
+          : record
+            ? `it is in temporary-container ${groupLabel(group)}`
+            : `${groupLabel(group)} could not be checked for a Brave temporary container yet`;
+        const why =
+          parsed.protocol === "about:"
+            ? "a browser-initiated about: navigation permanently moves a Brave container tab into the profile's default cookie jar"
+            : "browser-internal pages refuse the debugger, so the tab's container isolation could not be verified on any later call";
+        return text(
+          `Refusing to navigate tab ${gated.id} to ${targetUrl}: ${where}, and ${why}. Navigate to an http(s) ` +
+            `URL instead.`
+        );
       }
       await chrome.tabs.update(tabId, { url: targetUrl });
     }
@@ -403,7 +448,7 @@ export const handlers = {
 
   async computer(args, ctx) {
     const { action, tabId } = args;
-    if (!(await isInGroup(tabId))) return notInGroup(tabId);
+    await requireTab(tabId);
 
     let coordinate = args.coordinate;
     let inputPath = "";
@@ -478,9 +523,10 @@ export const handlers = {
 
       case "hover": {
         if (!coordinate) return needsCoordinate();
-        await dispatchMouse(tabId, "mouseMoved", coordinate[0], coordinate[1], { modifiers });
+        const acked = await moveMouse(tabId, coordinate[0], coordinate[1], { modifiers });
         await sleep(200);
-        return withSnapshot(`Hovered at (${coordinate[0]}, ${coordinate[1]})${inputPath}`, args, tabId, ctx);
+        const note = acked ? "" : " (the page never acknowledged the move, so it may not have registered)";
+        return withSnapshot(`Hovered at (${coordinate[0]}, ${coordinate[1]})${inputPath}${note}`, args, tabId, ctx);
       }
 
       case "type": {
@@ -563,13 +609,15 @@ export const handlers = {
         }
         const [sx, sy] = args.start_coordinate;
         const [ex, ey] = coordinate;
-        await dispatchMouse(tabId, "mouseMoved", sx, sy, { modifiers });
+        // A page that did not ack the first move will not ack the next ten either; skip them rather
+        // than wait 3 s for each.
+        let moving = await moveMouse(tabId, sx, sy, { modifiers });
         await sleep(50);
         await dispatchMouse(tabId, "mousePressed", sx, sy, { button: "left", modifiers });
         await sleep(50);
         const steps = 10;
-        for (let i = 1; i <= steps; i++) {
-          await dispatchMouse(tabId, "mouseMoved", sx + ((ex - sx) * i) / steps, sy + ((ey - sy) * i) / steps, { modifiers });
+        for (let i = 1; i <= steps && moving; i++) {
+          moving = await moveMouse(tabId, sx + ((ex - sx) * i) / steps, sy + ((ey - sy) * i) / steps, { modifiers });
           await sleep(20);
         }
         await dispatchMouse(tabId, "mouseReleased", ex, ey, { button: "left", modifiers });
@@ -624,7 +672,7 @@ export const handlers = {
 
   async read_page(args, ctx) {
     const { tabId } = args;
-    if (!(await isInGroup(tabId))) return notInGroup(tabId);
+    await requireTab(tabId);
 
     const filter = args.filter === "all" ? "all" : "interactive";
     const maxChars = clampInt(args.max_chars, DEFAULT_MAX_CHARS, 500, 200000);
@@ -667,7 +715,7 @@ export const handlers = {
 
   async find(args) {
     const { query, tabId } = args;
-    if (!(await isInGroup(tabId))) return notInGroup(tabId);
+    await requireTab(tabId);
 
     // Attach first: the 1344x756 override relayouts the page, and coordinates measured before
     // it lands would be stale by the time the very next action applies it. find itself needs no
@@ -688,7 +736,7 @@ export const handlers = {
 
   async form_input(args, ctx) {
     const { ref, value, tabId } = args;
-    if (!(await isInGroup(tabId))) return notInGroup(tabId);
+    await requireTab(tabId);
 
     // read_page hands out CDP refs, find hands out content-script refs; accept both.
     if (CDP_REF.test(String(ref))) {
@@ -727,7 +775,7 @@ export const handlers = {
 
   async get_page_text(args) {
     const { tabId } = args;
-    if (!(await isInGroup(tabId))) return notInGroup(tabId);
+    await requireTab(tabId);
 
     const maxChars = clampInt(args.max_chars, DEFAULT_MAX_CHARS, 500, 200000);
     const resp = await sendContentMessage(tabId, { type: "getPageText" });
@@ -753,27 +801,18 @@ export const handlers = {
 
   async resize_window(args) {
     const { tabId } = args;
-    if (!(await isInGroup(tabId))) return notInGroup(tabId);
+    await requireTab(tabId);
 
     const width = clampInt(args.width, CAPTURE_W, 200, 4000);
     const height = clampInt(args.height, CAPTURE_H, 200, 4000);
 
-    // Re-point the emulation override rather than resizing the OS window: the override is what
-    // screenshots and Input.dispatchMouseEvent coordinates both follow, so moving it is what
-    // actually changes the coordinate space, and it keeps the two in step. It goes through
-    // cdp.js so the capture path reads the new size instead of the pinned default.
+    // Only the emulated viewport moves, never the OS window: a window is shared with the human and
+    // with every other agent's groups in it, so resizing it rearranges work that is not this agent's.
+    // The override is what screenshots and Input.dispatchMouseEvent coordinates both follow anyway,
+    // so moving it is what actually changes the coordinate space. It goes through cdp.js so the
+    // capture path reads the new size instead of the pinned default.
     await setViewport(tabId, width, height);
 
-    let note = "";
-    try {
-      const tab = await chrome.tabs.get(tabId);
-      const win = await chrome.windows.get(tab.windowId);
-      if (win.state === "normal") await chrome.windows.update(win.id, { width, height });
-      else note = ` (window left ${win.state})`;
-    } catch {
-      note = " (window unchanged)";
-    }
-
-    return text(`Viewport now ${width}x${height}${note}. Screenshots and coordinates use this space.`);
+    return text(`Viewport now ${width}x${height} (the window is unchanged). Screenshots and coordinates use this space.`);
   },
 };

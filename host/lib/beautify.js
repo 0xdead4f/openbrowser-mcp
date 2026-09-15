@@ -1,5 +1,5 @@
 // Dependency-free JS/CSS/JSON pretty-printer used by the download sink.
-// The on-disk tree is the greppable copy (PLAN §9.2), so minified bundles are broken onto
+// The on-disk tree is the greppable copy, so minified bundles are broken onto
 // lines at write time and nobody has to re-run prettier.
 
 const MAX_INPUT = 16 * 1024 * 1024;

@@ -70,7 +70,10 @@ let brokerSocket = null;
 let myClientId = null;
 
 // A download can legitimately run for minutes; everything else keeps the inherited 60 s budget.
-const TOOL_TIMEOUT_MS = { sources_download: 600000, sources_list: 120000 };
+// tabs_create_mcp is pinned rather than inherited: a Brave temporaryContainer chains a profile scan
+// (up to 3 s), the relay (up to 10 s), the tab's arrival (up to 10 s) and the isolation probe, and a
+// budget cut below that fails a tab the extension is still verifying.
+const TOOL_TIMEOUT_MS = { sources_download: 600000, sources_list: 120000, tabs_create_mcp: 60000 };
 
 // --- Pidfile management ---
 
@@ -424,8 +427,17 @@ function handleBrowserLine(ref, line) {
   if (relay) {
     if (msg.type !== "tool_chunk") {
       clientRequestMap.delete(msg.id);
-      // Closing a tab is the one result that reliably invalidates an index entry.
-      if (msg.type === "tool_response" && relay.tool === "tabs_close_mcp" && relay.args?.tabId != null) {
+      // Closing a tab is the one result that reliably invalidates an index entry. Only for a bare
+      // tabId: with groupId as well the extension refuses (a text result, not an error) and closes
+      // nothing, and dropping the still-open tab would leave it unroutable until the next keepalive
+      // push, since an unchanged index is not re-sent. A groupId close is left to the tab_index push
+      // that its tab removals trigger in the extension.
+      if (
+        msg.type === "tool_response" &&
+        relay.tool === "tabs_close_mcp" &&
+        relay.args?.tabId != null &&
+        relay.args?.groupId == null
+      ) {
         registry.dropTab(relay.browserId, relay.args.tabId);
       }
     }
@@ -1054,6 +1066,12 @@ async function runSpill(name, args) {
 
 async function callTool(name, args) {
   try {
+    // A new group's name is the human's only clue to which agent owns it, and the agent's project
+    // directory is the best label on hand; only this per-agent client knows it (the broker is shared,
+    // the extension has no filesystem). A tabId joins an existing group, which already has a name.
+    if (name === "tabs_create_mcp" && args && args.tabId == null && !(typeof args.group === "string" && args.group.trim())) {
+      args.group = path.basename(process.cwd()) || "MCP";
+    }
     // Without a broker there is nobody else to answer these, so serve them from the registry we own.
     if (BROKER_LOCAL.has(name) && mode === "primary") return brokerLocalTool("local", name, args);
     if (name === "sources_download") return await runSourcesDownload(args);

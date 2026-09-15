@@ -531,7 +531,7 @@ cmd_uninstall() {
     pid="$(tr -dc '0-9' < "$pidfile" || true)"
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       # A live pid under a predecessor repo's name is that repo's broker, and both are
-      # meant to run side by side (PLAN §4). Uninstalling us must not take it down; only
+      # meant to run side by side. Uninstalling us must not take it down; only
       # its pidfile is swept, and only once it is dead.
       case "$(basename "$pidfile")" in
         openbrowser-mcp-*) ;;

@@ -128,7 +128,14 @@ export class BrowserRegistry {
 
     if (tabId !== undefined && tabId !== null && tabId !== "") {
       const candidates = this.browsersForTab(tabId);
-      if (candidates.length === 1) return { browserId: candidates[0] };
+      // A browser_select pin outranks a lone index hit in ANOTHER browser. Tab ids are per-browser
+      // counters and the index lists every grouped tab, the human's own groups included, so a stale id
+      // (a closed container tab in the pinned Brave) that collides with a grouped Chrome tab used to
+      // run the agent's navigate or JS in the human's logged-in Chrome session. The pinned browser
+      // answers "No tab with id" instead; an explicit browserId (above) still reaches the other one.
+      if (candidates.length === 1) {
+        return { browserId: selectedLive && candidates[0] !== selectedLive ? selectedLive : candidates[0] };
+      }
       if (candidates.length > 1) {
         if (selectedLive && candidates.includes(selectedLive)) return { browserId: selectedLive };
         const who = candidates.map((id) => describe(this.browsers.get(id))).join(", ");

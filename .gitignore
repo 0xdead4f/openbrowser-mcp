@@ -17,6 +17,3 @@ key.pem
 # Downloaded page source (sources_download default outDir)
 source/
 .openbrowser/
-
-# Design notes, kept local
-PLAN.md

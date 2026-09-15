@@ -1,7 +1,7 @@
-// Tools 11-16: page evaluation and the observation ladder (PLAN §5.4, §5.8, §5.9).
+// Tools 11-16: page evaluation and the observation ladder.
 
 import { cdp, ensureAttached, ensureDomain } from "./cdp.js";
-import { isInGroup } from "./contexts.js";
+import { requireTab } from "./contexts.js";
 import { snapshotRefs } from "./refs.js";
 import { STDLIB_GUARDED, registerStdlib } from "./stdlib.js";
 import {
@@ -27,10 +27,6 @@ function text(t) {
   return { content: [{ type: "text", text: t }] };
 }
 
-function notInGroup(tabId) {
-  return text(`Tab ${tabId} is not in the MCP group.`);
-}
-
 function clampInt(value, fallback, min, max) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
@@ -38,7 +34,7 @@ function clampInt(value, fallback, min, max) {
 }
 
 // --- output spill --------------------------------------------------------------
-// Anything big leaves as tool_chunk and the result carries only a handle (PLAN §5.10).
+// Anything big leaves as tool_chunk and the result carries only a handle.
 
 async function spill(ctx, filename, body, contentType) {
   const bytes = new TextEncoder().encode(body);
@@ -368,12 +364,13 @@ function renderSurface(s, prefix) {
 // --- handlers ------------------------------------------------------------------
 
 export const handlers = {
-  // The only tool here that can mutate the page, so it is the only one that keeps the
-  // MCP-group restriction (PLAN §13 Q3).
+  // Every handler here gates on requireTab, the read-only ones included: an ungrouped tab is the
+  // human's, and a tab of a temporary-container group must be re-verified before anything reads it,
+  // or an agent would be reading (and trusting) a tab that silently fell back to the default jar.
   async javascript_tool(args, ctx) {
     const { tabId, text: expression } = args;
     if (!expression) return text("Nothing to evaluate: pass text.");
-    if (!(await isInGroup(tabId))) return notInGroup(tabId);
+    await requireTab(tabId);
 
     await ensureAttached(tabId);
     await ensureDomain(tabId, "Page");
@@ -421,6 +418,7 @@ export const handlers = {
 
   async page_outline(args) {
     const { tabId } = args;
+    await requireTab(tabId);
     await ensureAttached(tabId);
     await ensureDomain(tabId, "Page");
     await ensureDomain(tabId, "DOM");
@@ -475,6 +473,7 @@ export const handlers = {
 
   async page_surface(args, ctx) {
     const { tabId } = args;
+    await requireTab(tabId);
     await ensureAttached(tabId);
     await ensureDomain(tabId, "Page");
     await ensureDomain(tabId, "Runtime");
@@ -546,6 +545,7 @@ export const handlers = {
     const { tabId, pattern, onlyErrors } = args;
     const limit = clampInt(args.limit, 100, 1, 1000);
 
+    await requireTab(tabId);
     await ensureAttached(tabId);
     await ensureDomain(tabId, "Console");
     await ensureDomain(tabId, "Runtime");
@@ -565,6 +565,7 @@ export const handlers = {
 
   async read_network_requests(args, ctx) {
     const { tabId } = args;
+    await requireTab(tabId);
     await ensureAttached(tabId);
     await ensureDomain(tabId, "Network");
     await ensureDomain(tabId, "Page");
@@ -588,6 +589,7 @@ export const handlers = {
 
   async read_network_request(args, ctx) {
     const { tabId, index, part = "response-headers" } = args;
+    await requireTab(tabId);
     await ensureAttached(tabId);
     await ensureDomain(tabId, "Network");
 

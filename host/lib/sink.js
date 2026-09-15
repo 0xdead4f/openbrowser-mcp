@@ -1,4 +1,4 @@
-// Disk writer + path reconstruction for sources_download (PLAN §9.3).
+// Disk writer + path reconstruction for sources_download.
 // A malicious site controls every URL that lands here, so each segment is sanitized and the
 // resolved destination is asserted to be inside outDir before a single byte is written.
 

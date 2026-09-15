@@ -1,4 +1,4 @@
-// The injected page stdlib (PLAN §5.9). Registered into the isolated world "obmcp" so
+// The injected page stdlib. Registered into the isolated world "obmcp" so
 // the ~780 chars of hand-written DOM walking measured per javascript_tool call collapse
 // to ~30 and return the same shape every session.
 //

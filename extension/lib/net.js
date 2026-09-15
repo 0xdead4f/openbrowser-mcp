@@ -1,4 +1,4 @@
-// Two-tier network log (PLAN §5.4) plus the console buffer, both navigation-scoped.
+// Two-tier network log plus the console buffer, both navigation-scoped.
 // This module is the single CDP-event sink for the worker: background routes every
 // chrome.debugger.onEvent here so that navigation eviction, request merging and
 // execution-context tracking all observe the same ordered stream.
@@ -23,7 +23,7 @@ const CAPTURE_MIME =
 
 const tabs = new Map(); // tabId -> state
 
-// Gated per PLAN §5.4; the host owns the config file, the worker only mirrors the flag.
+// Body capture is gated by the host config; the host owns the config file, the worker only mirrors the flag.
 let captureBodies = true;
 try {
   chrome.storage.local.get({ captureBodies: true }).then((v) => {

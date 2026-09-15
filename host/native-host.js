@@ -9,9 +9,21 @@
 import net from "node:net";
 
 import { createLineReader, encodeLine, readNativeMessages, encodeNativeMessage } from "./lib/framing.js";
-import { DEFAULT_PORT, loadConfig } from "./lib/config.js";
+import { DEFAULT_PORT, EXTENSION_ID, loadConfig } from "./lib/config.js";
+import { createHostOps, realSystem } from "./lib/browser-process.js";
 
 const TCP_PORT = loadConfig().port || DEFAULT_PORT;
+
+// host_request is work only THIS process can do: it is the browser's child, so its parent chain names
+// the exact binary and profile a Brave temporary-container relay has to target, which the broker
+// (shared by every browser) cannot know. The extension id falls back to the manifest-pinned one
+// because the installed wrappers do not forward Chrome's chrome-extension:// argument to node.
+const hostOps = createHostOps(realSystem({ defaultExtensionId: EXTENSION_ID }));
+// Every exit path (the extension's port closing, the broker gone for good): a Brave relay orphaned
+// mid-flight would, at Chromium's 20 s singleton timeout, SIGKILL a stalled browser and take it over.
+process.on("exit", () => hostOps.killRelays());
+// A signal skips "exit" unless handled, so turn one into a normal exit and the relays die with us.
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => process.exit(0));
 
 // --- TCP connection to the broker ---
 
@@ -91,6 +103,15 @@ process.stdin.on("data", (chunk) => {
   const { messages, state } = readNativeMessages(nativeState, chunk);
   nativeState = state;
   for (const msg of messages) {
+    // Answered here and written straight back on stdout, never forwarded: the broker has no handler
+    // for it, and a request parked in `pending` while the broker is down would stall a tab creation
+    // on something that needs no broker at all. handle() never rejects; failures come back ok:false.
+    // Deliberately not queued: restore_front arrives while open_temporary_container is still awaiting
+    // its relay's exit, and a hand-back that waited for that exit would come too late to matter.
+    if (msg?.type === "host_request") {
+      hostOps.handle(msg).then((response) => process.stdout.write(encodeNativeMessage(response)));
+      continue;
+    }
     if (msg?.type === "host_hello") cachedHello = msg;
     if (tcpReady && tcpSocket && !tcpSocket.destroyed) tcpSocket.write(encodeLine(msg));
     else if (msg?.type !== "host_hello" && pending.length < MAX_PENDING) pending.push(msg);
