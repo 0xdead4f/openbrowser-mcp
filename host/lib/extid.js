@@ -27,7 +27,7 @@ if (argv.includes("--help") || argv.includes("-h")) {
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const manifestPath = path.resolve(
-  positional[0] ?? path.join(here, "..", "extension", "manifest.json")
+  positional[0] ?? path.join(here, "..", "..", "extension", "manifest.json")
 );
 
 function fail(message) {
