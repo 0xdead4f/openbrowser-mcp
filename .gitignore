@@ -17,3 +17,7 @@ key.pem
 # Downloaded page source (sources_download default outDir)
 source/
 .openbrowser/
+
+# Cleave addon bookkeeping — written by the open-browser addon setup when this
+# checkout is symlinked in as ~/.cleave/addons/open-browser.
+config.toml
