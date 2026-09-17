@@ -16,7 +16,7 @@ export const TOOLS = [
   {
     name: "tabs_context_mcp",
     description:
-      "Every tab group with windowId, groupId, name and tab IDs. Only grouped tabs can be driven.",
+      "Every tab group with windowId, groupId, name and tab IDs, plus any popup window a group's own pages opened. Only these tabs can be driven.",
     inputSchema: { type: "object", properties: { windowId: num } },
     _meta: meta(20000),
   },
@@ -28,7 +28,7 @@ export const TOOLS = [
       type: "object",
       properties: {
         group: { type: "string", description: "Name for the new group." },
-        tabId: { type: "number", description: "Join this tab's group instead." },
+        tabId: { type: "number", description: "Join this tab's group instead; a popup joins the group that owns it." },
         temporaryContainer: { type: "boolean", description: "Brave only: fresh isolated cookies and storage." },
         incognito: bool,
         windowId: num,
@@ -38,7 +38,7 @@ export const TOOLS = [
   },
   {
     name: "tabs_close_mcp",
-    description: "Closes a grouped tab, or every tab of groupId.",
+    description: "Closes one tab by tabId, or every tab of groupId.",
     inputSchema: { type: "object", properties: { tabId: num, groupId: num } },
     _meta: meta(20000),
   },

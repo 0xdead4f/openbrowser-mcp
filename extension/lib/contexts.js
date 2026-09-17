@@ -2,7 +2,8 @@
 // existing window or tab is its own, so each creates its own group and names it. The name is only a
 // label for the human (and a hint for the agent): the tab id is the identity, nothing is ever looked up
 // by name, and two groups with the same name are two workspaces. Agents may use any tab group, the
-// human's own included; ungrouped tabs stay off-limits.
+// human's own included; ungrouped tabs stay off-limits, except for a popup window a grouped page opened,
+// which Chromium will not let anything group or move and which popups.js attributes to its opener.
 //
 // Live group and tab state is always read from chrome.tabGroups / chrome.tabs, never cached: Chrome adds
 // link-opened tabs to groups, and the human drags tabs and groups around, so any cached tab set goes
@@ -12,6 +13,7 @@
 // lost with it would drop a container group's isolation check until the group was probed again.
 
 import * as brave from "./brave-containers.js";
+import * as popups from "./popups.js";
 import { editTabs } from "./tab-edits.js";
 
 export const TAB_GROUP_NONE = chrome.tabGroups?.TAB_GROUP_ID_NONE ?? -1;
@@ -98,6 +100,7 @@ chrome.tabGroups.onRemoved.addListener((group) => {
       return;
     } catch {}
     learning.delete(group.id);
+    popups.forgetGroup(group.id).catch(() => {});
     if (groupRecords.delete(group.id)) persist();
   }, REMOVAL_CONFIRM_MS);
 });
@@ -107,16 +110,18 @@ chrome.tabGroups.onRemoved.addListener((group) => {
 // { tab, record }: tab may be a reloaded copy, and record is null when the probe could not read the
 // tab's jar, or read it before the tab's page had finished loading and found no container; nothing is
 // recorded then, and the next call probes again.
-async function recordFor(tab) {
+// groupId is passed separately because an adopted popup carries TAB_GROUP_NONE while belonging to a
+// group (popups.js); everything else passes its own tab.groupId.
+async function recordFor(tab, groupId = tab.groupId) {
   await loadRecords();
-  const known = groupRecords.get(tab.groupId);
+  const known = groupRecords.get(groupId);
   if (known) return { tab, record: known };
 
   // Only Brave has temporary containers, and never in incognito (tabs_create_mcp refuses the pair),
   // so everything else is plain without spending a debugger attach on it.
   if (tab.incognito || !(await brave.isBrave())) {
     const record = { container: null };
-    await setRecord(tab.groupId, record);
+    await setRecord(groupId, record);
     return { tab, record };
   }
 
@@ -128,9 +133,8 @@ async function recordFor(tab) {
     throw new Error(`${e.message}. Retry, or call tabs_context_mcp to pick another tab.`);
   }
 
-  let pending = learning.get(tab.groupId);
+  let pending = learning.get(groupId);
   if (!pending) {
-    const groupId = tab.groupId;
     const probed = tab;
     pending = (async () => {
       const learned = await brave.learnContainer(probed.id);
@@ -148,6 +152,64 @@ async function recordFor(tab) {
     learning.set(groupId, pending);
   }
   return { tab, record: await pending };
+}
+
+// The container record of a group, learned only from a tab that is really IN it. An adopted popup must
+// never classify its group: a valid stamp can only come from a container's jar, but a PLAIN verdict from
+// a popup that silently fell into the default jar would record the whole group as plain, and a group
+// recorded plain is never probed again. null when no member's jar can be read yet, which callers treat
+// as "possibly a container", exactly as recordFor's null does.
+async function recordForOwnerGroup(group) {
+  await loadRecords();
+  const known = groupRecords.get(group.id);
+  if (known) return known;
+  const members = await chrome.tabs.query({ groupId: group.id });
+  if (members.length === 0) return null;
+  // No containers to find on any other browser, or in incognito; recordFor's own short-circuit answers.
+  if (members[0].incognito || !(await brave.isBrave())) {
+    return (await recordFor(members[0], group.id)).record;
+  }
+
+  // Probed through learnContainer rather than recordFor because recordFor PERSISTS the first verdict it
+  // gets, and the first member to answer may be the wrong one to ask: the human can add a default-jar tab
+  // to a container group ("New tab in group"), and recording the group plain on its word would stop every
+  // tab of that group ever being isolation-checked again. A stamp can only come from a container's own
+  // jar, so a container verdict is decisive; a plain one only settles it once no member contradicts it.
+  let pending = learning.get(group.id);
+  if (!pending) {
+    pending = (async () => {
+      let plain = null;
+      for (const member of members) {
+        let tab;
+        try {
+          tab = await brave.wakeTab(member);
+        } catch {
+          continue;
+        }
+        let learned = null;
+        try {
+          learned = await brave.learnContainer(tab.id);
+        } catch {
+          continue;
+        }
+        if (learned?.container) return learned;
+        // A plain verdict needs a committed page, for the reason recordFor gives: before a reload
+        // commits, a tab can still read the default jar through its discarded placeholder.
+        if (learned) {
+          const now = await chrome.tabs.get(tab.id).catch(() => null);
+          if (tab.status === "complete" && now?.status === "complete") plain = learned;
+        }
+      }
+      return plain;
+    })()
+      .then(async (record) => {
+        if (record) await setRecord(group.id, record);
+        return record;
+      })
+      .finally(() => learning.delete(group.id));
+    learning.set(group.id, pending);
+  }
+  return pending;
 }
 
 // The record already known for a tab's group, without probing. null when there is none yet.
@@ -184,27 +246,37 @@ export function formatGroups(entries) {
   let used = 0;
   let hiddenTabs = 0;
   let hiddenGroups = 0;
-  for (const { group, tabs, record } of entries) {
+  for (const { group, tabs, record, popups: adopted = [] } of entries) {
+    // Adopted popups are rows of their owner group's table: an agent picks a tabId the same way for
+    // both, and the popup column is what tells it this one lives in a window of its own.
+    const rows = [...tabs.map((t) => ({ t, popup: false })), ...adopted.map((t) => ({ t, popup: true }))];
     if (hiddenTabs > 0) {
-      hiddenTabs += tabs.length;
+      hiddenTabs += rows.length;
       hiddenGroups++;
       continue;
     }
     let head = `Group ${group.id} ${groupName(group.title)} · window ${group.windowId} · ${group.color}`;
     if (tabs.some((t) => t.incognito)) head += " · incognito";
     if (record?.container) head += ` · temporary container ${JSON.stringify(record.container.containerName)}`;
-    let block = `${head}\n| tabId | active | title | url |\n|---|---|---|---|`;
+    // The column only appears for a group that actually has a popup, so the usual listing is unchanged.
+    const cols = adopted.length
+      ? ["tabId", "active", "popup", "title", "url"]
+      : ["tabId", "active", "title", "url"];
+    let block = `${head}\n| ${cols.join(" | ")} |\n|${cols.map(() => "---|").join("")}`;
     let size = used + (blocks.length ? 2 : 0) + block.length;
     let shown = 0;
-    for (const t of tabs) {
-      const row = `| ${t.id} | ${t.active ? "yes" : ""} | ${cell(t.title || "Untitled", 40)} | ${cell(t.url || t.pendingUrl, 100)} |`;
+    for (const { t, popup } of rows) {
+      const cells = [String(t.id), t.active ? "yes" : ""];
+      if (adopted.length) cells.push(popup ? `window ${t.windowId}` : "");
+      cells.push(cell(t.title || "Untitled", 40), cell(t.url || t.pendingUrl, 100));
+      const row = `| ${cells.join(" | ")} |`;
       if (size + 1 + row.length > LISTING_MAX_CHARS - FOOTER_RESERVE) break;
       block += `\n${row}`;
       size += 1 + row.length;
       shown++;
     }
-    if (shown < tabs.length) {
-      hiddenTabs += tabs.length - shown;
+    if (shown < rows.length) {
+      hiddenTabs += rows.length - shown;
       hiddenGroups++;
     }
     if (shown > 0) {
@@ -228,7 +300,11 @@ export function formatGroups(entries) {
 export async function listGroups({ windowId } = {}) {
   await loadRecords();
   const filter = windowId != null ? { windowId: Number(windowId) } : {};
-  const [groups, tabs] = await Promise.all([chrome.tabGroups.query(filter), chrome.tabs.query(filter)]);
+  const [groups, tabs, adopted] = await Promise.all([
+    chrome.tabGroups.query(filter),
+    chrome.tabs.query(filter),
+    popups.adoptedByGroup(),
+  ]);
   const byGroup = new Map();
   for (const t of tabs) {
     if (t.groupId === TAB_GROUP_NONE) continue;
@@ -241,6 +317,9 @@ export async function listGroups({ windowId } = {}) {
       group,
       tabs: (byGroup.get(group.id) || []).sort((a, b) => a.index - b.index),
       record: groupRecords.get(group.id) || null,
+      // Listed with their group, never with the window they float in: windowId selects a workspace's
+      // window, and a popup of that workspace lives in a window of its own.
+      popups: adopted.get(group.id) || [],
     }))
     .filter((e) => e.tabs.length > 0)
     .sort((a, b) => a.group.windowId - b.group.windowId || a.tabs[0].index - b.tabs[0].index);
@@ -256,7 +335,7 @@ export async function groupEntry(groupId) {
   }
   const tabs = (await chrome.tabs.query({ groupId: group.id })).sort((a, b) => a.index - b.index);
   if (tabs.length === 0) return null;
-  return { group, tabs, record: await knownRecord(tabs[0]) };
+  return { group, tabs, record: await knownRecord(tabs[0]), popups: await popups.adoptedFor(group.id) };
 }
 
 // The tab and its group, with no isolation check. For operations that do not act inside the page:
@@ -272,14 +351,32 @@ export async function groupedTab(tabId) {
     tab = await chrome.tabs.get(Number(tabId));
   } catch {
     throw new Error(
-      `No tab with id ${tabId}. Call tabs_context_mcp to list the tabs in tab groups, or tabs_create_mcp to open one.`
+      `No tab with id ${tabId}. Call tabs_context_mcp to list the tabs in tab groups, or tabs_create_mcp to ` +
+        `open one. A popup window closes itself when the flow it holds finishes, so its tab id stops existing ` +
+        `the moment it is done.`
     );
   }
   if (tab.groupId === TAB_GROUP_NONE) {
-    throw new Error(
-      `Tab ${tab.id} is not in a tab group, and only tabs in tab groups can be used. Call tabs_context_mcp ` +
-        `to list grouped tabs, or tabs_create_mcp({group: "<name>"}) to open a tab in a new group.`
-    );
+    // A tab alone in a popup window is ungrouped by Chromium's construction, not by ownership: it cannot
+    // be grouped or moved out of that window by any API (popups.js). It is usable when its opener chain
+    // reaches a tab group, and then it belongs to that group.
+    const ownerId = (await popups.isAdoptableWindow(tab)) ? await popups.ownerGroupId(tab) : null;
+    if (ownerId == null) {
+      throw new Error(
+        `Tab ${tab.id} is not in a tab group, and only tabs in tab groups can be used. Call tabs_context_mcp ` +
+          `to list grouped tabs, or tabs_create_mcp({group: "<name>"}) to open a tab in a new group. A popup ` +
+          `window is usable only when the page that opened it is in a tab group, and this one's is not.`
+      );
+    }
+    let owner;
+    try {
+      owner = await chrome.tabGroups.get(ownerId);
+    } catch {
+      throw new Error(
+        `Tab ${tab.id} is a popup of a tab group that was just removed. Call tabs_context_mcp and pick a tab again.`
+      );
+    }
+    return { tab, group: owner, popup: true };
   }
   let group;
   try {
@@ -287,17 +384,18 @@ export async function groupedTab(tabId) {
   } catch {
     throw new Error(`Tab ${tab.id}'s group was just removed. Call tabs_context_mcp and pick a tab again.`);
   }
-  return { tab, group };
+  return { tab, group, popup: false };
 }
 
-// The gate every tool that acts on a tab goes through. Returns { tab, group, record }; throws unless
-// the tab exists, is in a tab group, and — when that group is a temporary container — provably still
-// reads its container's cookie jar right now. record is null only on Brave when the group has never
-// been probed successfully (the tab shows a page the debugger cannot attach to), so callers must treat
-// null as "possibly a container".
+// The gate every tool that acts on a tab goes through. Returns { tab, group, record, popup }; throws
+// unless the tab exists, is in a tab group (or is a popup adopted into one), and — when that group is a
+// temporary container — provably still reads its container's cookie jar right now. record is null only
+// on Brave when the group has never been probed successfully (the tab shows a page the debugger cannot
+// attach to), so callers must treat null as "possibly a container". popup marks a tab that is in the
+// group's workspace but not in its window: group.windowId is not tab.windowId for one of those.
 export async function requireTab(tabId) {
   const found = await groupedTab(tabId);
-  const { group } = found;
+  const { group, popup } = found;
   let tab = found.tab;
 
   // On Brave every grouped tab is woken, whatever its group's record says: the record describes the
@@ -313,11 +411,49 @@ export async function requireTab(tabId) {
     }
   }
   let record;
-  ({ tab, record } = await recordFor(tab));
-  if (!record?.container) return { tab, group, record };
+  if (popup) {
+    // Classified through the group's own tabs, never through the popup — see recordForOwnerGroup.
+    record = await recordForOwnerGroup(group);
+    // Fail closed, unlike the grouped-tab path below. An unknown record there is tolerated because the
+    // tab is provably the agent's own and navigate re-probes it per call; here it would mean driving a
+    // window that may be reading the profile's own logged-in session while the agent believes the group
+    // is isolated — which is the whole thing containers exist to prevent.
+    if (!record) {
+      throw new Error(
+        `Tab ${tab.id} is a popup window opened from ${groupLabel(group)}, and whether that group is a Brave ` +
+          `temporary container could not be checked: no tab of the group has a readable cookie jar right now ` +
+          `(they may still be loading, show a browser-internal page, or have another debugger attached). ` +
+          `Driving the popup unchecked could act on your own logged-in session, so it is refused. Navigate a ` +
+          `tab of the group to a web page and retry.`
+      );
+    }
+  } else {
+    ({ tab, record } = await recordFor(tab, group.id));
+  }
+  if (!record?.container) return { tab, group, record, popup };
 
   const { tab: checked, reason } = await brave.checkIsolation(tab, record.container.stamp);
-  if (reason == null) return { tab: checked, group, record };
+  if (reason == null) return { tab: checked, group, record, popup };
+
+  // A popup cannot be replaced: it holds a flow the site started, and no API can move it into the
+  // container. Saying "open a verified tab instead" would be advice an agent cannot act on.
+  if (popup) {
+    // The check reads the jar through the debugger, so a consent window that closed itself mid-call
+    // fails it. That is the flow finishing, not a leak, and it is the single most likely way this is hit.
+    if (!(await chrome.tabs.get(tab.id).catch(() => null))) {
+      throw new Error(
+        `Tab ${tab.id} is gone: the popup closed itself, which is what a consent window does when its flow ` +
+          `finishes. Read the outcome from the tab of ${groupLabel(group)} that opened it.`
+      );
+    }
+    throw new Error(
+      `Tab ${tab.id} is a popup window opened from temporary-container ${groupLabel(group)} (container ` +
+        `${JSON.stringify(record.container.containerName)}), but it does not read that container's cookie jar ` +
+        `(${reason}) — it is running as a different identity than the group, so anything done in it would be ` +
+        `signed in as the wrong user. Close it with tabs_close_mcp({tabId: ${tab.id}}) and start the flow ` +
+        `again from a tab of the group.`
+    );
+  }
 
   // Adding first, closing second: tabs_create_mcp({tabId}) reuses the container without checking the tab
   // it names, while closing a group's last tab ends the group, its record, and with it the only way back
@@ -333,10 +469,15 @@ export async function requireTab(tabId) {
 
 // Every grouped tab, for the broker's tabId -> browser routing index.
 export async function groupedTabIndex() {
-  const tabs = await chrome.tabs.query({});
+  const [tabs, adopted] = await Promise.all([chrome.tabs.query({}), popups.adoptedByGroup()]);
+  // Without this the extension-side gate opening changes nothing: registry.js routes by this index and
+  // rejects a tabId missing from it before the call ever reaches the browser.
+  const adoptedIds = new Set([...adopted.values()].flat().map((t) => t.id));
   return tabs
-    .filter((t) => t.groupId !== TAB_GROUP_NONE)
-    .map((t) => ({ tabId: t.id, windowId: t.windowId, incognito: !!t.incognito }))
+    .filter((t) => t.groupId !== TAB_GROUP_NONE || adoptedIds.has(t.id))
+    // popup so the broker can tell a workspace window from the throwaway window a popup floats in;
+    // without it browsers_list counts every open OAuth window as another window of the browser.
+    .map((t) => ({ tabId: t.id, windowId: t.windowId, incognito: !!t.incognito, popup: adoptedIds.has(t.id) }))
     .sort((a, b) => a.tabId - b.tabId);
 }
 
@@ -535,13 +676,18 @@ export async function addTabToGroup(tabId, { group: name, windowId, incognito, t
     );
   }
 
-  const { record } = await recordFor(found.tab);
+  const record = found.popup ? await recordForOwnerGroup(group) : (await recordFor(found.tab, group.id)).record;
   if (!record) {
     throw new Error(
-      `Could not tell whether ${label} is a Brave temporary container: tab ${found.tab.id}'s cookie jar ` +
-        `cannot be read yet (it may still be loading, show a browser-internal page, or have another debugger ` +
-        `attached). Retry once it has loaded, pass the tabId of another tab of that group that shows a web ` +
-        `page, or navigate this one to a web page first.`
+      found.popup
+        ? `Could not tell whether ${label} is a Brave temporary container: none of that group's own tabs has ` +
+            `a readable cookie jar right now (they may still be loading, show a browser-internal page, or have ` +
+            `another debugger attached). Tab ${found.tab.id} is a popup window, and a popup is never used to ` +
+            `classify the group it was opened from. Navigate a tab of the group to a web page and retry.`
+        : `Could not tell whether ${label} is a Brave temporary container: tab ${found.tab.id}'s cookie jar ` +
+            `cannot be read yet (it may still be loading, show a browser-internal page, or have another debugger ` +
+            `attached). Retry once it has loaded, pass the tabId of another tab of that group that shows a web ` +
+            `page, or navigate this one to a web page first.`
     );
   }
   if (temporaryContainer != null && !!temporaryContainer !== !!record.container) {

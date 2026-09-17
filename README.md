@@ -41,6 +41,10 @@ A few things worth knowing:
   stable id; `browser_select` pins one per agent session.
 - **Every agent gets its own tab group.** Agents open background tabs in a named group of their
   own and never focus a window, so several can work in your browser while you keep using it.
+- **Popup windows are drivable.** An OAuth consent window opened with `window.open` lands in a window
+  of its own that Chromium will not let anything group or move. It is adopted into the tab group of
+  whatever opened it, listed there by `tabs_context_mcp`, and driven like any other tab — with the same
+  Brave container check, so the login happens as that agent's identity and not yours.
 - **Brave container support.** In Brave, `tabs_create_mcp({temporaryContainer: true})` gives an
   agent's group its own temporary container: cookies and storage separate from your profile and
   from every other agent, so four agents can be logged in to the same site as four different users.
@@ -141,9 +145,9 @@ everything else takes one.
 
 | Tabs | |
 |---|---|
-| `tabs_context_mcp` | List every tab group — window, group id, name, colour, container — and its tabs. |
+| `tabs_context_mcp` | List every tab group — window, group id, name, colour, container — its tabs, and any popup window they opened. |
 | `tabs_create_mcp` | Open a background tab in a new named group, or in `tabId`'s group; `temporaryContainer` in Brave. |
-| `tabs_close_mcp` | Close one grouped tab, or every tab of a `groupId`. No `windowId`; a window closes only if nothing else was in it. |
+| `tabs_close_mcp` | Close one tab, or every tab of a `groupId` and the popup windows its pages opened. No `windowId`; a window closes only if nothing else was in it. |
 
 | Interaction | |
 |---|---|
@@ -193,6 +197,10 @@ name defaults to the agent's working directory) with one tab, and returns that t
 - **Any tab group is usable, ungrouped tabs are not.** An agent may act on a group you made
   yourself; a tab outside every group is refused — except by `sources_list` and `sources_download`,
   which read any tab.
+- **A popup window belongs to whatever opened it.** Chromium lets nothing group or move a popup's
+  tab, so it is attributed to the tab group of the page that opened it, following the chain when a
+  popup opens another. A popup you opened from a tab of your own is refused like any ungrouped tab,
+  and one opened from a container group must still prove it reads that container's cookie jar.
 
 **Temporary containers (Brave only).** `tabs_create_mcp({group, temporaryContainer: true})` puts the
 group's tab in a brand-new Brave temporary container, so its cookies and site storage are separate

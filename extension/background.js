@@ -4,12 +4,14 @@
 import * as bridge from "./lib/bridge.js";
 import { TAB_GROUP_NONE, groupRecords, groupedTabIndex, loadRecords } from "./lib/contexts.js";
 import { getIdentity, setLabel } from "./lib/identity.js";
+import * as popups from "./lib/popups.js";
 import { detach, attachedTabIds } from "./lib/cdp.js";
 import * as net from "./lib/net.js";
 import * as refs from "./lib/refs.js";
 import { editTabs } from "./lib/tab-edits.js";
 import { handlers as coreHandlers } from "./lib/tools.core.js";
 import * as page from "./lib/tools.page.js";
+import { forgetStdlib } from "./lib/stdlib.js";
 import { handlers as sourcesHandlers } from "./lib/tools.sources.js";
 
 // Prevent unhandled rejections from killing the service worker
@@ -107,6 +109,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   detach(tabId).catch(() => {});
   net.clear(tabId);
   refs.invalidate(tabId);
+  forgetStdlib(tabId);
+  popups.forget(tabId).catch(() => {});
   schedulePush();
 });
 
@@ -149,7 +153,62 @@ chrome.tabs
 
 chrome.tabs.onCreated.addListener((tab) => {
   if (tab.active && tab.groupId !== TAB_GROUP_NONE) keepHumanTab(tab).catch(() => {});
+  // Recorded here and not on demand because both sources of attribution are perishable: the worker is
+  // torn down after ~30 s idle, and Chromium clears openerTabId when the opener closes — which a site
+  // does routinely, right after its popup reports back.
+  popups
+    .noteOpened(tab)
+    .then((groupId) => {
+      if (groupId != null) {
+        schedulePush(); // the popup only becomes routable once it is attributed
+        keepHumanWindow(tab, groupId).catch(() => {});
+      }
+    })
+    .catch(() => {});
 });
+
+// A popup window arrives focused, on top of whatever the human was looking at. keepHumanTab cannot see
+// it — it listens for tabs and checks tab.groupId, and a popup's tab has neither a group nor a window of
+// the human's. Adoption is what proves the popup is an agent's doing rather than the human's, so the
+// hand-back is gated on exactly that. Only the window is raised: the popup keeps running (and stays
+// drivable through the focus emulation cdp.js sets on every attach), it just stops covering the human.
+let lastFocusedWindowId = null;
+let previousFocusedWindowId = null;
+
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE || windowId === lastFocusedWindowId) return;
+  previousFocusedWindowId = lastFocusedWindowId;
+  lastFocusedWindowId = windowId;
+});
+chrome.windows.onRemoved.addListener((windowId) => {
+  if (lastFocusedWindowId === windowId) lastFocusedWindowId = null;
+  if (previousFocusedWindowId === windowId) previousFocusedWindowId = null;
+});
+chrome.windows
+  .getLastFocused({ windowTypes: ["normal"] })
+  .then((win) => {
+    if (lastFocusedWindowId == null) lastFocusedWindowId = win.id;
+  })
+  .catch(() => {});
+
+async function keepHumanWindow(tab, groupId) {
+  const held = new Set(attachedTabIds());
+  held.delete(tab.id);
+  if (held.size === 0) return;
+  const members = await chrome.tabs.query({ groupId });
+  // Only a group with a tab an agent is actually driving; a popup from the human's own grouped tab is
+  // theirs to look at.
+  if (!members.some((t) => held.has(t.id))) return;
+  // onCreated may land before or after the popup takes focus; either order resolves to the window the
+  // human had in front.
+  const back = lastFocusedWindowId === tab.windowId ? previousFocusedWindowId : lastFocusedWindowId;
+  if (back == null || back === tab.windowId) return;
+  // A human watching the group's own tab is watching this flow happen; leave their focus alone.
+  if (members.some((t) => t.windowId === back && t.active)) return;
+  const win = await chrome.windows.get(back).catch(() => null);
+  if (!win || win.type !== "normal") return;
+  await chrome.windows.update(back, { focused: true }).catch(() => {});
+}
 
 async function keepHumanTab(tab) {
   // A new-tab page is the human's own doing (the group's context menu), never a page's.
@@ -226,5 +285,5 @@ globalThis.openbrowser = {
 };
 
 // --- Init ---
-loadRecords().then(schedulePush, schedulePush);
+Promise.all([loadRecords(), popups.loadOwners()]).then(schedulePush, schedulePush);
 bridge.connect({ onToolRequest, onControl });

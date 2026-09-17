@@ -77,7 +77,9 @@ export class BrowserRegistry {
       label: e.label,
       incognitoAllowed: !!e.incognitoAllowed,
       connectedAt: e.connectedAt,
-      windows: new Set([...e.tabs.values()].map((t) => t.windowId)).size,
+      // Popups sit alone in a window of their own that no group can live in, so counting those
+      // would report more windows than the human has open.
+      windows: new Set([...e.tabs.values()].filter((t) => !t.popup).map((t) => t.windowId)).size,
       tabs: e.tabs.size,
     }));
   }
@@ -90,7 +92,7 @@ export class BrowserRegistry {
     for (const t of tabs) {
       const tabId = Number(t?.tabId);
       if (!Number.isFinite(tabId)) continue;
-      entry.tabs.set(tabId, { tabId, windowId: t.windowId ?? null, incognito: !!t.incognito });
+      entry.tabs.set(tabId, { tabId, windowId: t.windowId ?? null, incognito: !!t.incognito, popup: !!t.popup });
     }
   }
 

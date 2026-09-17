@@ -14,6 +14,7 @@ import {
   addTabToGroup,
 } from "./contexts.js";
 import { isBrave, readsDefaultJar } from "./brave-containers.js";
+import { adoptedFor } from "./popups.js";
 
 const DEFAULT_MAX_CHARS = 20000;
 const SNAPSHOT_MAX_CHARS = 2000;
@@ -296,6 +297,37 @@ const SET_VALUE_FN = `function(value) {
   return { ok: true, value: target.value };
 }`;
 
+// Whether this tab could be in a Brave temporary container right now. A null record is a group whose jar
+// could not be read yet, so it may well be one. A plain record describes the GROUP, not this tab — a
+// container tab can sit in a plain group (dragged there, or the human's own) — so on Brave the tab has to
+// prove it reads the profile's default jar; an unreadable jar proves nothing. Incognito tabs are never in
+// a container. unproven is true only when that per-tab probe is what made the answer true.
+async function containerSuspicion(tab, record) {
+  if (!record || record.container != null) return { mayBeContainer: true, unproven: false };
+  if (tab.incognito || !(await isBrave())) return { mayBeContainer: false, unproven: false };
+  const unproven = !(await readsDefaultJar(tab.id).catch(() => false));
+  return { mayBeContainer: unproven, unproven };
+}
+
+// Where a back/forward would land: { url, protocol }, with url null when there is no such entry (the
+// call would be a no-op), or null when the history could not be read at all.
+async function historyTarget(tabId, direction) {
+  let hist;
+  try {
+    hist = await cdp(tabId, "Page.getNavigationHistory");
+  } catch {
+    return null;
+  }
+  const idx = (hist?.currentIndex ?? -1) + (direction === "back" ? -1 : 1);
+  const entry = hist?.entries?.[idx];
+  if (!entry?.url) return { url: null, protocol: null };
+  try {
+    return { url: entry.url, protocol: new URL(entry.url).protocol };
+  } catch {
+    return { url: entry.url, protocol: null };
+  }
+}
+
 export const handlers = {
   // Read-only on purpose: listing never creates, probes or attaches, so an agent can look before it
   // decides. A group only shows as a temporary container once this worker knows it is one (it created
@@ -357,27 +389,51 @@ export const handlers = {
       if (!entry) {
         return text(`No tab group with groupId ${groupId}. Call tabs_context_mcp to list the tab groups.`);
       }
-      for (const t of entry.tabs) {
+      // Adopted popups go with the group: they are windows the group's own pages opened, and left
+      // behind they would be unattributable the moment their opener is gone.
+      const all = [...entry.tabs, ...(entry.popups || [])];
+      for (const t of all) {
         try { await detach(t.id); } catch {}
       }
-      await chrome.tabs.remove(entry.tabs.map((t) => t.id));
-      return text(`Closed ${groupLabel(entry.group)} and its ${entry.tabs.length} tab(s).`);
+      // One id at a time: chrome.tabs.remove(array) stops at the first id it cannot resolve, so a consent
+      // popup that closed itself mid-call would leave the ids after it open and report the whole close as
+      // failed. A tab that is already gone is the outcome this asked for anyway.
+      let closed = 0;
+      for (const t of all) {
+        if (await chrome.tabs.remove(t.id).then(() => true).catch(() => false)) closed++;
+      }
+      return text(`Closed ${groupLabel(entry.group)} and its ${closed} tab(s).`);
     }
 
     // No isolation check: closing is exactly what the check tells an agent to do with a leaked tab.
     const { tab, group } = await groupedTab(tabId);
+    // Read before the removal: if this is the group's last tab, Chrome destroys the group with it, and the
+    // group's popups lose the only thing that attributed them — no tool could list, drive or close those
+    // windows again. They go with the group, exactly as the groupId branch does it.
+    const alsoOwned = await adoptedFor(group.id);
     try { await detach(tab.id); } catch {}
     await chrome.tabs.remove(tab.id);
 
     // Chrome destroys a group with its last tab.
     const entry = await groupEntry(group.id);
-    if (!entry) return text(`Closed tab ${tab.id}. It was the last tab of ${groupLabel(group)}, which is gone now.`);
+    if (!entry) {
+      let orphans = 0;
+      for (const p of alsoOwned) {
+        if (p.id === tab.id) continue;
+        try { await detach(p.id); } catch {}
+        if (await chrome.tabs.remove(p.id).then(() => true).catch(() => false)) orphans++;
+      }
+      return text(
+        `Closed tab ${tab.id}. It was the last tab of ${groupLabel(group)}, which is gone now.` +
+          (orphans ? ` Its ${orphans} popup window(s) closed with it.` : "")
+      );
+    }
     return text(`Closed tab ${tab.id}.\n\n${formatGroups([entry])}`);
   },
 
   async navigate(args, ctx) {
     const { url, tabId } = args;
-    const { tab: gated, group, record } = await requireTab(tabId);
+    const { tab: gated, group, record, popup } = await requireTab(tabId);
 
     const started = Date.now();
 
@@ -392,10 +448,30 @@ export const handlers = {
       await ensureDomain(tabId, "Page");
     } catch {}
 
-    if (url === "back") {
-      await chrome.tabs.goBack(tabId);
-    } else if (url === "forward") {
-      await chrome.tabs.goForward(tabId);
+    if (url === "back" || url === "forward") {
+      // The scheme guard below never sees these: where they land is whatever the history holds. That
+      // matters most for a popup — a page that opens one the way OAuth libraries do, window.open("",
+      // name, features) and then assigning location, leaves about:blank as history entry 0 — and a
+      // browser-initiated navigation to about:blank moves a Brave container tab into the profile's
+      // default cookie jar for good, with no error. Unreadable history counts as unsafe: a leak that
+      // cannot be undone has to fail closed.
+      const target = await historyTarget(tabId, url);
+      const leaky =
+        target === null ||
+        (target.url != null && (target.protocol == null || CONTAINER_UNSAFE_SCHEMES.has(target.protocol)));
+      if (leaky) {
+        const { mayBeContainer } = await containerSuspicion(gated, record);
+        if (mayBeContainer) {
+          return text(
+            `Refusing to go ${url} in tab ${gated.id}: ` +
+              (target?.url ? `the ${url} entry is ${target.url}` : `this tab's history could not be read`) +
+              `, and a browser-initiated navigation to a browser-internal page permanently moves a Brave ` +
+              `container tab into the profile's default cookie jar. Navigate to an http(s) URL instead.`
+          );
+        }
+      }
+      if (url === "back") await chrome.tabs.goBack(tabId);
+      else await chrome.tabs.goForward(tabId);
     } else {
       const targetUrl = normalizeUrl(String(url));
       let parsed;
@@ -408,17 +484,17 @@ export const handlers = {
       // plain record describes the group, not this tab: a Brave container tab can sit in a plain group
       // (dragged there, or the human's own container tab), so on Brave the tab must prove it reads the
       // default jar; an unreadable jar proves nothing. Incognito tabs are never in a container.
+      // Probed only for a scheme that could actually leak, so an ordinary https navigation pays nothing.
       let mayBeContainer = !record || record.container != null;
       let unproven = false;
-      if (!mayBeContainer && CONTAINER_UNSAFE_SCHEMES.has(parsed.protocol) && !gated.incognito && (await isBrave())) {
-        unproven = !(await readsDefaultJar(tabId).catch(() => false));
-        mayBeContainer = unproven;
+      if (!mayBeContainer && CONTAINER_UNSAFE_SCHEMES.has(parsed.protocol)) {
+        ({ mayBeContainer, unproven } = await containerSuspicion(gated, record));
       }
       if (mayBeContainer && CONTAINER_UNSAFE_SCHEMES.has(parsed.protocol)) {
         const where = unproven
           ? `the tab does not provably read the profile's default cookie jar, so it may be a Brave container tab`
           : record
-            ? `it is in temporary-container ${groupLabel(group)}`
+            ? `it ${popup ? "is a popup window opened from" : "is in"} temporary-container ${groupLabel(group)}`
             : `${groupLabel(group)} could not be checked for a Brave temporary container yet`;
         const why =
           parsed.protocol === "about:"
@@ -449,6 +525,12 @@ export const handlers = {
   async computer(args, ctx) {
     const { action, tabId } = args;
     await requireTab(tabId);
+
+    // Attach first, for the reason find spells out at its own call: the 1344x756 override relayouts the
+    // page, so a coordinate the content script measured before it lands describes the old layout. On a
+    // maximized window the two are close enough that it went unnoticed; a popup window is ~500px wide,
+    // so the click lands somewhere else entirely. Tolerated on failure, like find's.
+    try { await ensureAttached(tabId); } catch {}
 
     let coordinate = args.coordinate;
     let inputPath = "";

@@ -447,7 +447,18 @@ export function list(tabId, opts = {}) {
   const st = tabs.get(tabId);
   const pageSize = Math.max(1, Math.min(100, opts.pageSize || DEFAULT_PAGE_SIZE));
   const pageIdx = Math.max(0, opts.pageIdx || 0);
-  if (!st) return { total: 0, pageIdx, pageCount: 0, text: "No network requests recorded for this tab yet." };
+  // Capture begins when the tab is first attached, so a window the page opened — a consent popup — has
+  // already finished its own load before an agent can name it. Empty here does not mean nothing happened.
+  if (!st)
+    return {
+      total: 0,
+      pageIdx,
+      pageCount: 0,
+      text:
+        "No network requests recorded for this tab yet. Capture starts when a tab is first attached, so a " +
+        "window the page opened had already finished loading by then; read where it ended up with " +
+        "javascript_tool({text: \"location.href\"}), or drive the flow again from the group's own tab.",
+    };
 
   const navs = opts.includePreserved ? st.navs : [currentNav(st)];
   const wanted = new Set(
