@@ -1,6 +1,6 @@
 // Tools 1-10: tab-group workspaces, navigation, input, and page reading.
 
-import { ensureAttached, ensureDomain, cdp, captureScreenshot, detach, setViewport, CAPTURE_W, CAPTURE_H } from "./cdp.js";
+import { ensureAttached, ensureDomain, cdp, captureScreenshot, setViewport, CAPTURE_W, CAPTURE_H } from "./cdp.js";
 import { snapshotRefs, resolveRefForAction, formatRef } from "./refs.js";
 import {
   requireTab,
@@ -392,9 +392,8 @@ export const handlers = {
       // Adopted popups go with the group: they are windows the group's own pages opened, and left
       // behind they would be unattributable the moment their opener is gone.
       const all = [...entry.tabs, ...(entry.popups || [])];
-      for (const t of all) {
-        try { await detach(t.id); } catch {}
-      }
+      // No detach first, here or below: the session is what answers a beforeunload prompt the close raises
+      // (background.js), and tabs.onRemoved detaches anyway.
       // One id at a time: chrome.tabs.remove(array) stops at the first id it cannot resolve, so a consent
       // popup that closed itself mid-call would leave the ids after it open and report the whole close as
       // failed. A tab that is already gone is the outcome this asked for anyway.
@@ -411,7 +410,6 @@ export const handlers = {
     // group's popups lose the only thing that attributed them — no tool could list, drive or close those
     // windows again. They go with the group, exactly as the groupId branch does it.
     const alsoOwned = await adoptedFor(group.id);
-    try { await detach(tab.id); } catch {}
     await chrome.tabs.remove(tab.id);
 
     // Chrome destroys a group with its last tab.
@@ -420,7 +418,6 @@ export const handlers = {
       let orphans = 0;
       for (const p of alsoOwned) {
         if (p.id === tab.id) continue;
-        try { await detach(p.id); } catch {}
         if (await chrome.tabs.remove(p.id).then(() => true).catch(() => false)) orphans++;
       }
       return text(

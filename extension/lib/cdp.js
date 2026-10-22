@@ -64,6 +64,13 @@ async function doAttach(tabId) {
     try {
       await chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled: true });
     } catch {}
+    // Page on every session, not lazily: it is what delivers Page.javascriptDialogOpening, and a
+    // beforeunload "Leave site?" prompt raised by a close or navigation nobody answers stalls it for good.
+    // background.js accepts it.
+    try {
+      await chrome.debugger.sendCommand({ tabId }, "Page.enable", {});
+      attachedTabs.get(tabId)?.enabledDomains.add("Page");
+    } catch {}
   } catch (e) {
     // The first command is what proves the tolerated attach really was ours. If it was not,
     // the entry has to go — ensureAttached short-circuits on it, so leaving it behind makes

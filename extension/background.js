@@ -93,6 +93,11 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   net.onCdpEvent(tabId, method, params, source.sessionId);
   page.onCdpEvent?.(tabId, method, params, source.sessionId);
 
+  // Agent tabs always leave: the page's beforeunload prompt would block the close or navigation forever.
+  if (method === "Page.javascriptDialogOpening" && params?.type === "beforeunload") {
+    chrome.debugger.sendCommand(source, "Page.handleJavaScriptDialog", { accept: true }).catch(() => {});
+  }
+
   // Only a top-frame document swap invalidates: a subframe carries a loaderId the snapshot never
   // saw, which would drop main-frame refs that are still perfectly valid. refs.js decides whether
   // the loaderId is actually new; a same-document navigation keeps the map.
