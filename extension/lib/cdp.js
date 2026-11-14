@@ -181,6 +181,22 @@ export async function detach(tabId) {
   } catch {}
 }
 
+// The alert/confirm/prompt open on a tab, kept on its session so a detach forgets it. beforeunload is not
+// one of them: background.js accepts that the moment it opens. sessionId is where it has to be answered.
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  const state = attachedTabs.get(source.tabId);
+  if (!state) return;
+  if (method === "Page.javascriptDialogOpening" && params?.type !== "beforeunload") {
+    state.dialog = { ...params, sessionId: source.sessionId };
+  } else if (method === "Page.javascriptDialogClosed") {
+    delete state.dialog;
+  }
+});
+
+export function openDialog(tabId) {
+  return attachedTabs.get(tabId)?.dialog || null;
+}
+
 // Chrome detaches us when the user dismisses the debugging infobar or the tab dies;
 // only local bookkeeping needs clearing, the transport is already gone.
 chrome.debugger.onDetach.addListener((source) => {

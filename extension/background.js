@@ -5,7 +5,7 @@ import * as bridge from "./lib/bridge.js";
 import { TAB_GROUP_NONE, groupRecords, groupedTabIndex, loadRecords } from "./lib/contexts.js";
 import { getIdentity, setLabel } from "./lib/identity.js";
 import * as popups from "./lib/popups.js";
-import { detach, attachedTabIds } from "./lib/cdp.js";
+import { detach, attachedTabIds, openDialog } from "./lib/cdp.js";
 import * as net from "./lib/net.js";
 import * as refs from "./lib/refs.js";
 import { editTabs } from "./lib/tab-edits.js";
@@ -39,12 +39,49 @@ async function onToolRequest(id, tool, args) {
       sendChunk: (a, b) =>
         b === undefined && a && typeof a === "object" ? bridge.sendChunk(id, a) : bridge.sendChunk(a, b),
     };
-    bridge.sendResponse(id, await handler(args || {}, ctx));
+    const run = handler(args || {}, ctx);
+    bridge.sendResponse(id, await Promise.race([run, heldByDialog(args?.tabId, run)]));
   } catch (err) {
     bridge.sendError(id, `${tool} failed: ${err.message}`);
   } finally {
     schedulePush();
   }
+}
+
+// A JS dialog freezes the page's main thread, and every input event, evaluate or content-script message
+// sent to it waits until the dialog is answered: a click that opens an alert() never returns. Once a dialog
+// has held the tab for the grace period, answer for the tool with what the dialog says. The grace lets
+// browser-side work (cookies, network log, closing the tab) finish on its own while a dialog is up.
+// ponytail: the abandoned handler resumes once the dialog is answered (a `type` finishes its remaining
+// characters); add a per-tab abort if that ever bites.
+const DIALOG_GRACE_MS = 500;
+const DIALOG_POLL_MS = 100;
+
+function heldByDialog(tabId, run) {
+  return new Promise((resolve) => {
+    if (tabId == null) return;
+    let since = 0;
+    const timer = setInterval(() => {
+      const d = openDialog(tabId);
+      if (!d) since = 0;
+      else if (!since) since = Date.now();
+      else if (Date.now() - since >= DIALOG_GRACE_MS) {
+        clearInterval(timer);
+        const prompt = d.type === "prompt" ? ` (default answer ${JSON.stringify(d.defaultPrompt || "")})` : "";
+        resolve({
+          content: [{
+            type: "text",
+            text:
+              `Tab ${tabId} is showing a JavaScript ${d.type}: ${JSON.stringify(d.message)}${prompt}. The page is ` +
+              `frozen until it is answered. Press OK with computer({action: "accept_dialog", tabId: ${tabId}})` +
+              (d.type === "prompt" ? `, passing text to answer the prompt.` : `.`),
+          }],
+        });
+      }
+    }, DIALOG_POLL_MS);
+    const stop = () => clearInterval(timer);
+    run.then(stop, stop);
+  });
 }
 
 // --- Tab index ---

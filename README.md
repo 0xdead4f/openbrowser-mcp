@@ -152,7 +152,7 @@ everything else takes one.
 | Interaction | |
 |---|---|
 | `navigate` | Go to a URL, back, or forward. |
-| `computer` | Mouse, keyboard, scroll and screenshot — by `ref` or `coordinate`. |
+| `computer` | Mouse, keyboard, scroll and screenshot — by `ref` or `coordinate`. `accept_dialog` presses OK on an `alert`/`confirm`/`prompt`; any call stalled behind one returns its message instead of hanging. |
 | `form_input` | Set a form field's value by ref. |
 | `javascript_tool` | Run JS in the page, isolated world by default. |
 | `resize_window` | Re-point the emulated viewport; the OS window is left alone. |

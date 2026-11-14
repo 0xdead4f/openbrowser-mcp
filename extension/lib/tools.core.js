@@ -1,6 +1,6 @@
 // Tools 1-10: tab-group workspaces, navigation, input, and page reading.
 
-import { ensureAttached, ensureDomain, cdp, captureScreenshot, setViewport, CAPTURE_W, CAPTURE_H } from "./cdp.js";
+import { ensureAttached, ensureDomain, cdp, captureScreenshot, setViewport, openDialog, CAPTURE_W, CAPTURE_H } from "./cdp.js";
 import { snapshotRefs, resolveRefForAction, formatRef } from "./refs.js";
 import {
   requireTab,
@@ -674,6 +674,24 @@ export const handlers = {
         });
         await sleep(300);
         return withSnapshot(`Scrolled to (${coordinate[0]}, ${coordinate[1]})`, args, tabId, ctx);
+      }
+
+      case "accept_dialog": {
+        // Sent even when none is recorded: a restarted worker never saw the opening event, and CDP is
+        // what actually knows whether one is showing.
+        const d = openDialog(tabId);
+        const answer = args.text != null ? { promptText: String(args.text) } : {};
+        try {
+          await cdp(tabId, "Page.handleJavaScriptDialog", { accept: true, ...answer }, d?.sessionId);
+        } catch (e) {
+          // Only CDP's own "No dialog is showing" means there is nothing to accept (Brave also closes an alert
+          // by itself when the human switches away from its tab); anything else is a real failure.
+          const why = String(e?.message || e);
+          if (/no dialog is showing/i.test(why)) return text(`No JavaScript dialog is open on tab ${tabId}.`);
+          return text(`Could not press OK on tab ${tabId}: ${why}`);
+        }
+        const what = d ? `the ${d.type} ${JSON.stringify(d.message)}` : "the dialog";
+        return withSnapshot(`Pressed OK on ${what}`, args, tabId, ctx);
       }
 
       case "wait": {
