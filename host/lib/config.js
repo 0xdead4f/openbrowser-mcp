@@ -3,11 +3,23 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const HOST_NAME = "io.openbrowser.mcp";
 export const EXTENSION_ID = "egpoedeomkhpkhiikghpjjcghafafbdc";
 export const SERVER_NAME = "openbrowser";
-export const VERSION = "0.2.0";
+
+// extension/manifest.json is the one place the version is set: the host always runs from the same
+// checkout, and Chromium reports the extension's version from that file. An unreadable manifest must not
+// take the host down over a label.
+export const VERSION = (() => {
+  try {
+    const manifest = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "extension", "manifest.json");
+    return JSON.parse(fs.readFileSync(manifest, "utf-8")).version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
 export const PROTOCOL_VERSION = "2025-06-18";
 
 // 18766, not 18765: the parent repo owns 18765 and speaks a subtly different

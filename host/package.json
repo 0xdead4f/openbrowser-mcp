@@ -1,6 +1,5 @@
 {
   "name": "openbrowser-mcp-host",
-  "version": "0.2.0",
   "private": true,
   "description": "MCP server and native messaging host for OpenBrowser MCP",
   "type": "module",
