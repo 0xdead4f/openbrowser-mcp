@@ -146,7 +146,7 @@ everything else takes one.
 | Tabs | |
 |---|---|
 | `tabs_context_mcp` | List every tab group — window, group id, name, colour, container — its tabs, and any popup window they opened. |
-| `tabs_create_mcp` | Open a background tab in a new named group, or in `tabId`'s group; `temporaryContainer` in Brave. |
+| `tabs_create_mcp` | Open a background tab in a new named group, or in `tabId`'s group; `temporaryContainer`, or `container: "Personal"` for one of the profile's own containers, in Brave. |
 | `tabs_close_mcp` | Close one tab, or every tab of a `groupId` and the popup windows its pages opened. No `windowId`; a window closes only if nothing else was in it. |
 
 | Interaction | |
@@ -229,6 +229,10 @@ tabs_create_mcp({ tabId: 812 })   // a second tab in the same group and the same
 - **Temporary is not wiped on close.** Closing a container's tabs does not delete its data. Brave
   removes a temporary container at a later browser restart, once nothing references it (no open
   tab, not in the last session, not among the recently closed tabs).
+- **Your own containers.** `tabs_create_mcp({container: "Personal"})` opens the tab in that existing
+  container of the profile instead, sharing its logins. It is relayed the same way without
+  `--temporary-container`, and checked the same way: a tab Brave leaves in the default jar is closed.
+  The name must match exactly.
 - **How it works.** No extension API can create a container, so the native host relaunches Brave's
   own binary with `--temporary-container --container=<name>` for your profile, and Brave hands that
   to the running browser (adding a tab to a container group works the same way). Brave opens that

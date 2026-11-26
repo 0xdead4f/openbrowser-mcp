@@ -1,5 +1,5 @@
-// Brave temporary containers: the one non-UI way to open a tab in one, and the probe that proves a tab
-// is still in it. Verified live against Brave 1.95 (Chromium 153); every function here is fail-closed —
+// Brave temporary containers, and the profile's own named containers (Personal, Work, ...): the one
+// non-UI way to open a tab in one, and the probe that proves a tab is still in it. Verified live against Brave 1.95 (Chromium 153); every function here is fail-closed —
 // a tab is only handed out after its own cookie jar was read through its own debugger session.
 //
 // Why a relaunch: no extension, CDP or URL API creates a container. Brave's `--temporary-container
@@ -124,9 +124,11 @@ function containerNameFor(label, nonce) {
 }
 
 // The stamp carries the container name so a group re-learned after a browser restart (when group ids
-// and chrome.storage.session are both gone) can still name its container.
-function makeStamp(nonce, containerName) {
-  return `${nonce}.${base64url(containerName)}`;
+// and chrome.storage.session are both gone) can still name its container. A ".n" suffix marks one of
+// the profile's own named containers: its tabs are relayed without --temporary-container. A named
+// container's jar outlives every group, so its stamp is written once and shared by all its groups.
+function makeStamp(nonce, containerName, named = false) {
+  return `${nonce}.${base64url(containerName)}${named ? ".n" : ""}`;
 }
 
 export function parseStamp(value) {
@@ -134,11 +136,13 @@ export function parseStamp(value) {
   const dot = value.indexOf(".");
   if (dot < 0) return null;
   const nonce = value.slice(0, dot);
-  const encoded = value.slice(dot + 1);
+  const named = value.endsWith(".n");
+  const encoded = value.slice(dot + 1, named ? -2 : undefined);
   if (!UUID_RE.test(nonce) || !/^[A-Za-z0-9_-]+$/.test(encoded)) return null;
   try {
     const containerName = fromBase64url(encoded);
-    return validContainerName(containerName) ? { stamp: value, containerName } : null;
+    if (!validContainerName(containerName)) return null;
+    return named ? { stamp: value, containerName, named: true } : { stamp: value, containerName };
   } catch {
     return null;
   }
@@ -447,7 +451,7 @@ async function restoreActive(tabId, openerTabId, before) {
   }
 }
 
-async function relay({ nonce, containerName, reuse }) {
+async function relay({ nonce, containerName, reuse, temporary = true }) {
   const url = bootstrapUrl(containerName, nonce);
   // Fresh per relay: the host records the app in front under it just before spawning, and restore_front
   // (sent when the tab arrives) hands focus back to exactly that app.
@@ -459,7 +463,7 @@ async function relay({ nonce, containerName, reuse }) {
   try {
     sent = await hostRequest(
       "open_temporary_container",
-      { url, containerName, reuse: !!reuse, restoreKey },
+      { url, containerName, reuse: !!reuse, temporary, restoreKey },
       { timeoutMs: RELAY_TIMEOUT_MS }
     );
   } catch (e) {
@@ -495,7 +499,15 @@ async function relay({ nonce, containerName, reuse }) {
   // arrival listener already switched to the opener; this covers a tab that came without one.
   await back;
   await restoreActive(tab.id, tab.openerTabId, before);
-  return { tab, before };
+  return { tab, before, sent };
+}
+
+// An older native host ignores temporary: false and relays into a temporary container of that name,
+// which would pass for the named one on first use. The host echoes the flag it acted on.
+function assertHonoured(sent, temporary) {
+  if (!temporary && sent.temporary !== false) {
+    throw new Error("the native host is older and opened a temporary container instead; re-run ./install.sh");
+  }
 }
 
 // One relay at a time: restoring the previously active tab is only right when no other relay's tab
@@ -510,25 +522,46 @@ function serialized(fn) {
 
 // --- Creation --------------------------------------------------------------------------------
 
-// A tab in a brand-new temporary container, stamped and verified, and no longer active. The caller
-// groups it. Any failure closes the tab: an unverified tab is never handed out.
-export function newContainerTab(label) {
+// A tab in a brand-new temporary container, or with named set in that existing container of the
+// profile, stamped and verified, and no longer active. The caller groups it. Any failure closes the tab:
+// an unverified tab is never handed out.
+export function newContainerTab(label, named = null) {
   return serialized(async () => {
+    if (named != null && !validContainerName(named)) {
+      throw new Error(
+        `container must be 1-${CONTAINER_NAME_MAX} characters, not start with "-" or whitespace, and hold no ` +
+          `control characters; got ${JSON.stringify(named)}`
+      );
+    }
     await ensureCanary();
     await ensureProfile();
     const nonce = crypto.randomUUID();
-    const containerName = containerNameFor(label, nonce);
-    const stamp = makeStamp(nonce, containerName);
-    const { tab, before } = await relay({ nonce, containerName, reuse: false });
+    const containerName = named ?? containerNameFor(label, nonce);
+    let stamp = makeStamp(nonce, containerName, named != null);
+    const { tab, before, sent } = await relay({ nonce, containerName, reuse: named != null, temporary: named == null });
 
     try {
+      assertHonoured(sent, named == null);
       const t = await chrome.tabs.get(tab.id);
       if (t.incognito) throw new Error("it opened in an incognito window");
       if (t.discarded) throw new Error("it was discarded before it could be checked");
       const jar = await readJar(t.id);
       if (jar.has(CANARY)) throw new Error("it reads the profile's default cookie jar, so Brave did not contain it");
-      if (jar.has(STAMP)) throw new Error("its jar already holds a container stamp, so the container is not new");
-      await writeStamp(t.id, stamp);
+      const old = jar.get(STAMP)?.value;
+      if (old) {
+        // A named container keeps its stamp from an earlier group; a temporary one is always new.
+        const parsed = named != null ? parseStamp(old) : null;
+        if (!parsed?.named || parsed.containerName !== containerName) {
+          throw new Error(
+            named != null
+              ? "its jar holds another container's stamp"
+              : "its jar already holds a container stamp, so the container is not new"
+          );
+        }
+        stamp = old;
+      } else {
+        await writeStamp(t.id, stamp);
+      }
       const again = await readJar(t.id);
       if (again.get(STAMP)?.value !== stamp) throw new Error("the container stamp did not stick in its cookie jar");
       if (again.has(CANARY)) throw new Error("it reads the profile's default cookie jar");
@@ -537,12 +570,16 @@ export function newContainerTab(label) {
       }
       // The relay may activate the tab after onCreated; check once more now that the tab is settled.
       await restoreActive(t.id, t.openerTabId, before);
-      return { tab: await chrome.tabs.get(t.id), stamp, containerName };
+      return { tab: await chrome.tabs.get(t.id), stamp, containerName, named: named != null };
     } catch (e) {
       await editTabs(() => chrome.tabs.remove(tab.id)).catch(() => {});
       throw new Error(
-        `The tab Brave opened for a new temporary container failed its isolation check and was closed ` +
-          `(${e?.message || e}). Retry tabs_create_mcp, or drop temporaryContainer for a plain, unisolated group.`
+        named != null
+          ? `The tab Brave opened for container ${JSON.stringify(named)} failed its isolation check and was ` +
+              `closed (${e?.message || e}). Check the name matches one of this profile's containers exactly ` +
+              `(brave://settings/containers), or drop container for a plain, unisolated group.`
+          : `The tab Brave opened for a new temporary container failed its isolation check and was closed ` +
+              `(${e?.message || e}). Retry tabs_create_mcp, or drop temporaryContainer for a plain, unisolated group.`
       );
     }
   });
@@ -552,13 +589,14 @@ export function newContainerTab(label) {
 // by the group's stamp instead of a new one. Kept to this one function so a relay-free inheritance path
 // can replace it: chrome.tabs.duplicate of a group tab inherits the container without activating the app
 // (window.open and target=_blank inherit it too, but activate Brave just like the relay does).
-export function newTabInContainer({ stamp, containerName }) {
+export function newTabInContainer({ stamp, containerName, named = false }) {
   return serialized(async () => {
     await ensureCanary();
     await ensureProfile();
-    const { tab, before } = await relay({ nonce: crypto.randomUUID(), containerName, reuse: true });
+    const { tab, before, sent } = await relay({ nonce: crypto.randomUUID(), containerName, reuse: true, temporary: !named });
 
     try {
+      assertHonoured(sent, !named);
       const t = await chrome.tabs.get(tab.id);
       if (t.incognito) throw new Error("it opened in an incognito window");
       if (t.discarded) throw new Error("it was discarded before it could be checked");
@@ -577,8 +615,9 @@ export function newTabInContainer({ stamp, containerName }) {
     } catch (e) {
       await editTabs(() => chrome.tabs.remove(tab.id)).catch(() => {});
       throw new Error(
-        `The tab Brave opened for temporary container "${containerName}" is not in that container and was ` +
-          `closed (${e?.message || e}). Create a new group with tabs_create_mcp({group, temporaryContainer: true}).`
+        `The tab Brave opened for ${named ? "" : "temporary "}container "${containerName}" is not in that ` +
+          `container and was closed (${e?.message || e}). Create a new group with ` +
+          (named ? `tabs_create_mcp({container: ${JSON.stringify(containerName)}}).` : `tabs_create_mcp({group, temporaryContainer: true}).`)
       );
     }
   });

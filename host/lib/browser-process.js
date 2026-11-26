@@ -561,7 +561,7 @@ export async function resolveProfile(sys, nonce, scan = {}) {
 
 // --- The relay ---
 
-export function validateContainerRequest({ url, containerName, reuse, restoreKey }) {
+export function validateContainerRequest({ url, containerName, reuse, temporary, restoreKey }) {
   if (typeof url !== "string" || !url.startsWith("data:text/html,")) {
     return "url must be a data:text/html, URL (about:blank lands in the default cookie jar, and no other scheme is relayed)";
   }
@@ -576,6 +576,7 @@ export function validateContainerRequest({ url, containerName, reuse, restoreKey
   if (containerName.startsWith("-")) return 'containerName must not start with "-"';
   if (containerName !== containerName.trim()) return "containerName must not start or end with whitespace";
   if (reuse !== undefined && typeof reuse !== "boolean") return "reuse must be a boolean";
+  if (temporary !== undefined && typeof temporary !== "boolean") return "temporary must be a boolean";
   if (restoreKey !== undefined && (typeof restoreKey !== "string" || !UUID.test(restoreKey))) {
     return "restoreKey must be a UUID (a fresh crypto.randomUUID() per relay, later passed to restore_front)";
   }
@@ -583,13 +584,16 @@ export function validateContainerRequest({ url, containerName, reuse, restoreKey
 }
 
 // Always --container: a fresh unique name makes a new named temporary container, and the same name
-// again reuses it (Brave matches temporary containers by name only). Never --new-window (steals the
+// again reuses it (Brave matches temporary containers by name only). temporary: false drops
+// --temporary-container, so the name picks one of the profile's own containers. Never --new-window (steals the
 // human's view), --same-tab (navigates the human's tab in ITS jar) or --enable-automation (the
 // running browser refuses the relay with exit 21).
-export function relayArgv(profile, { url, containerName }) {
+export function relayArgv(profile, { url, containerName, temporary = true }) {
   const argv = [];
   if (profile.explicitUserDataDir) argv.push(`--user-data-dir=${profile.userDataDir}`);
-  argv.push(`--profile-directory=${profile.profileDir}`, "--temporary-container", `--container=${containerName}`, url);
+  argv.push(`--profile-directory=${profile.profileDir}`);
+  if (temporary !== false) argv.push("--temporary-container");
+  argv.push(`--container=${containerName}`, url);
   return argv;
 }
 
@@ -783,7 +787,8 @@ export function createHostOps(sys, { scan = {}, relayTimeoutMs = RELAY_TIMEOUT_M
     if (run.exitCode !== 0 && !relayed) {
       throw new Error(`the Brave relay exited with ${run.exitCode ?? `signal ${run.signal}`} without reaching the running browser`);
     }
-    return { exitCode: run.exitCode, relayed };
+    // Echoed so the extension can tell this host honoured temporary: false (an older one ignores it).
+    return { exitCode: run.exitCode, relayed, temporary: msg.temporary !== false };
   }
 
   // Sent by the extension, unawaited, the moment it sees the relayed tab. Each skip is an answer

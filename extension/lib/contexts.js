@@ -31,7 +31,7 @@ const GROUP_COLORS = ["blue", "red", "yellow", "green", "pink", "purple", "cyan"
 
 // --- Group records -----------------------------------------------------------------------------
 
-export const groupRecords = new Map(); // groupId -> { container: null | { stamp, containerName } }
+export const groupRecords = new Map(); // groupId -> { container: null | { stamp, containerName, named? } }
 const learning = new Map(); // groupId -> in-flight probe, so concurrent calls on one group probe once
 let loading = null;
 let persisting = Promise.resolve();
@@ -257,7 +257,7 @@ export function formatGroups(entries) {
     }
     let head = `Group ${group.id} ${groupName(group.title)} · window ${group.windowId} · ${group.color}`;
     if (tabs.some((t) => t.incognito)) head += " · incognito";
-    if (record?.container) head += ` · temporary container ${JSON.stringify(record.container.containerName)}`;
+    if (record?.container) head += ` · ${containerKind(record)} ${JSON.stringify(record.container.containerName)}`;
     // The column only appears for a group that actually has a popup, so the usual listing is unchanged.
     const cols = adopted.length
       ? ["tabId", "active", "popup", "title", "url"]
@@ -463,7 +463,9 @@ export async function requireTab(tabId) {
       `${JSON.stringify(record.container.containerName)}) but is no longer isolated in its container ` +
       `(${reason}). First open a verified tab in the same container with tabs_create_mcp({tabId: ${tab.id}}), ` +
       `then close this one with tabs_close_mcp({tabId: ${tab.id}}); or create a new group with ` +
-      `tabs_create_mcp({group: "<name>", temporaryContainer: true}).`
+      (record.container.named
+        ? `tabs_create_mcp({container: ${JSON.stringify(record.container.containerName)}}).`
+        : `tabs_create_mcp({group: "<name>", temporaryContainer: true}).`)
   );
 }
 
@@ -595,10 +597,21 @@ export function colorFor(name) {
   return GROUP_COLORS[(h >>> 0) % GROUP_COLORS.length];
 }
 
+export function containerKind(record) {
+  return record.container?.named ? "container" : "temporary container";
+}
+
 // A NEW group holding one background tab — always new, even when a group with that name exists.
 // Returns { tab, group, record }.
-export async function createGroup({ group, windowId, incognito = false, temporaryContainer = false } = {}) {
-  const name = normalizeName(group) || DEFAULT_GROUP_NAME;
+export async function createGroup({ group, windowId, incognito = false, temporaryContainer = false, container = null } = {}) {
+  const name = normalizeName(group) || normalizeName(container) || DEFAULT_GROUP_NAME;
+  if (container != null) {
+    await brave.assertBrave();
+    if (temporaryContainer) {
+      throw new Error("container opens one of the profile's own containers; drop temporaryContainer, or drop container for a new temporary one.");
+    }
+    if (incognito) throw new Error("container cannot be combined with incognito: Brave does not put incognito tabs in containers. Drop one of the two.");
+  }
   if (temporaryContainer) {
     // Brand first: on any other browser "drop incognito" would only lead to the next refusal.
     await brave.assertBrave();
@@ -614,11 +627,12 @@ export async function createGroup({ group, windowId, incognito = false, temporar
   let tab = null;
   try {
     let record;
-    if (temporaryContainer) {
+    if (temporaryContainer || container != null) {
       // Opens wherever Brave's relay puts it (the last-active window); grouping below moves it to winId.
-      const opened = await brave.newContainerTab(name);
+      const opened = await brave.newContainerTab(name, container);
       tab = opened.tab;
       record = { container: { stamp: opened.stamp, containerName: opened.containerName } };
+      if (opened.named) record.container.named = true;
     } else {
       // about:blank, not the chrome://newtab/ default: the debugger cannot attach to a chrome:// URL,
       // so a newtab-parked tab refuses every attach until the first navigation has already finished —
@@ -649,9 +663,9 @@ export async function createGroup({ group, windowId, incognito = false, temporar
 // ONE new background tab at the end of tabId's group, in that group's window, and in its container
 // when it is a container group. The creation params only have to agree with the group; they never
 // select anything. Returns { tab, group, record }.
-export async function addTabToGroup(tabId, { group: name, windowId, incognito, temporaryContainer } = {}) {
+export async function addTabToGroup(tabId, { group: name, windowId, incognito, temporaryContainer, container } = {}) {
   // Brand first, so a non-Brave browser is never told to "pass temporaryContainer: true" instead.
-  if (temporaryContainer === true) await brave.assertBrave();
+  if (temporaryContainer === true || container != null) await brave.assertBrave();
   const found = await groupedTab(tabId);
   const { group } = found;
   const label = groupLabel(group);
@@ -698,6 +712,13 @@ export async function addTabToGroup(tabId, { group: name, windowId, incognito, t
             `to create a new plain group.`
         : `${label} is a plain tab group, and a tab added with tabId joins it as it is. Drop ` +
             `temporaryContainer, or drop tabId and pass temporaryContainer: true to create a new container group.`
+    );
+  }
+
+  if (container != null && !(record.container?.named && record.container.containerName === container)) {
+    throw new Error(
+      `${label} is ${record.container ? `in ${containerKind(record)} ${JSON.stringify(record.container.containerName)}` : "a plain tab group"}, ` +
+        `and a tab added with tabId opens there. Drop container, or drop tabId to create a new group in ${JSON.stringify(container)}.`
     );
   }
 

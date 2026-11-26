@@ -12,6 +12,7 @@ import {
   groupLabel,
   createGroup,
   addTabToGroup,
+  containerKind,
 } from "./contexts.js";
 import { isBrave, readsDefaultJar } from "./brave-containers.js";
 import { adoptedFor } from "./popups.js";
@@ -357,16 +358,18 @@ export const handlers = {
             windowId: args.windowId,
             incognito: args.incognito,
             temporaryContainer: args.temporaryContainer,
+            container: args.container,
           })
         : await createGroup({
             group: args.group,
             windowId: args.windowId,
             incognito: args.incognito === true,
             temporaryContainer: args.temporaryContainer === true,
+            container: args.container ?? null,
           });
 
     const container = record.container
-      ? `, temporary container ${JSON.stringify(record.container.containerName)}`
+      ? `, ${containerKind(record)} ${JSON.stringify(record.container.containerName)}`
       : "";
     const head = `Created tab ${tab.id} in group ${group.id} ${groupName(group.title)} (window ${group.windowId}${container}).`;
     const entry = await groupEntry(group.id);

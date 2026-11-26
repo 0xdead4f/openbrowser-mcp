@@ -30,6 +30,7 @@ export const TOOLS = [
         group: { type: "string", description: "Name for the new group." },
         tabId: { type: "number", description: "Join this tab's group instead; a popup joins the group that owns it." },
         temporaryContainer: { type: "boolean", description: "Brave only: fresh isolated cookies and storage." },
+        container: { type: "string", description: "Brave only: open in this existing container of the profile by name (e.g. Personal), sharing its cookies." },
         incognito: bool,
         windowId: num,
       },

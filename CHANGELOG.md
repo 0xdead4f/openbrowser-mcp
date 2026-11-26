@@ -3,6 +3,12 @@
 The version lives in `extension/manifest.json` only; the host reads it from there. To release, bump it,
 move the Unreleased entries under the new version with today's date, commit, and tag `vX.Y.Z`.
 
+## Unreleased
+
+### Added
+- `tabs_create_mcp({container: "<name>"})` opens a tab in one of the Brave profile's own named containers
+  (Personal, Work, ...), verified like a temporary container. Needs the updated native host.
+
 ## 0.3.0 — 2026-11-14
 
 ### Added
